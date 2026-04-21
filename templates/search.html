@@ -1,0 +1,44 @@
+{{define "content"}}
+<div class="max-w-3xl mx-auto p-8" style="--max-w: 768px; --p: 8;">
+    <h1 class="text-2xl font-bold mb-6">Search</h1>
+    
+    <form hx-get="/search" hx-target="#main-content" hx-push-url="true" class="mb-8">
+        <div class="display-flex gap-2">
+            <input 
+                type="text" 
+                name="q" 
+                value="{{.Query}}" 
+                placeholder="Search notes..." 
+                class="flex-1 px py rounded-md border text-sm" 
+                style="--px: 4; --py: 2.5; --border: var(--color-gray-300); --dark-border: var(--color-gray-700); background: var(--bg); color: var(--color);"
+                autofocus
+            >
+            <button type="submit" class="px py rounded-md text-sm font-medium" style="--px: 4; --py: 2.5; --bg: var(--color-blue-600); --color: var(--color-white);" data-fs>
+                Search
+            </button>
+        </div>
+    </form>
+
+    {{if .Query}}
+    <p class="text-sm opacity-60 mb-4" style="--opacity: 0.6;">
+        {{len .Results}} result{{if ne (len .Results) 1}}s{{end}} for "{{.Query}}"
+    </p>
+    
+    {{if .Results}}
+    <div class="display-flex flex-col gap-2" style="--gap: 2;">
+        {{range .Results}}
+        <a href="/note/{{.Path}}" hx-get="/note/{{.Path}}" hx-target="#main-content" hx-push-url="true" class="display-flex items-center gap-3 px py rounded-md border" style="--px: 4; --py: 3; --gap: 3; --border: var(--color-gray-200); --dark-border: var(--color-gray-800); text-decoration: none; color: inherit;" data-fs>
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="opacity-50" style="--opacity: 0.5;">
+                <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/>
+                <polyline points="14 2 14 8 20 8"/>
+            </svg>
+            <span class="font-medium">{{.Title}}</span>
+        </a>
+        {{end}}
+    </div>
+    {{else}}
+    <p class="opacity-50" style="--opacity: 0.5;">No results found.</p>
+    {{end}}
+    {{end}}
+</div>
+{{end}}

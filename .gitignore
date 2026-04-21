@@ -1,0 +1,29 @@
+# Binaries
+vitra
+*.exe
+
+# Air live reload
+tmp/
+
+# Dependencies
+vendor/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Environment
+.env
+
+# Obsidian (we ignore this entirely as per requirements)
+.obsidian/
+
+# Vitra state (app-specific, not Obsidian)
+.vitra/

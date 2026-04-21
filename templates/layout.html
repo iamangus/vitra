@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="system">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vitra</title>
+    <link rel="stylesheet" href="https://unpkg.com/frankenstyle@latest/dist/css/frankenstyle.min.css" />
+    <script src="https://unpkg.com/frankenstyle@latest/dist/js/frankenstyle.min.js"></script>
+    <script src="https://unpkg.com/htmx.org@2.0.4/dist/htmx.min.js"></script>
+    <style>
+        :root {
+            --sidebar-w: 280px;
+            --header-h: 48px;
+        }
+        html.dark {
+            color-scheme: dark;
+        }
+        .wikilink {
+            color: var(--color-blue-600);
+            text-decoration: none;
+            border-bottom: 1px dashed var(--color-blue-400);
+        }
+        .wikilink.missing {
+            color: var(--color-red-500);
+            border-bottom-color: var(--color-red-400);
+        }
+        html.dark .wikilink {
+            color: var(--color-blue-400);
+        }
+        html.dark .wikilink.missing {
+            color: var(--color-red-400);
+        }
+        .tag {
+            color: var(--color-purple-600);
+            text-decoration: none;
+            font-size: 0.875em;
+        }
+        html.dark .tag {
+            color: var(--color-purple-400);
+        }
+        .tag:hover {
+            text-decoration: underline;
+        }
+        .display-none {
+            display: none !important;
+        }
+        /* Markdown content styles */
+        .markdown-content h1 { font-size: 1.875rem; font-weight: 700; margin-bottom: 1rem; margin-top: 1.5rem; }
+        .markdown-content h2 { font-size: 1.5rem; font-weight: 600; margin-bottom: 0.75rem; margin-top: 1.25rem; }
+        .markdown-content h3 { font-size: 1.25rem; font-weight: 600; margin-bottom: 0.5rem; margin-top: 1rem; }
+        .markdown-content p { margin-bottom: 0.75rem; line-height: 1.7; }
+        .markdown-content ul, .markdown-content ol { margin-bottom: 0.75rem; padding-left: 1.5rem; }
+        .markdown-content li { margin-bottom: 0.25rem; }
+        .markdown-content code { background: var(--color-gray-100); padding: 0.125rem 0.375rem; border-radius: 0.25rem; font-size: 0.875em; }
+        html.dark .markdown-content code { background: var(--color-gray-800); }
+        .markdown-content pre { background: var(--color-gray-100); padding: 1rem; border-radius: 0.5rem; overflow-x: auto; margin-bottom: 1rem; }
+        html.dark .markdown-content pre { background: var(--color-gray-800); }
+        .markdown-content pre code { background: none; padding: 0; }
+        .markdown-content blockquote { border-left: 3px solid var(--color-gray-300); padding-left: 1rem; margin-left: 0; color: var(--color-gray-600); }
+        html.dark .markdown-content blockquote { border-left-color: var(--color-gray-600); color: var(--color-gray-400); }
+        .markdown-content img { max-width: 100%; height: auto; }
+        .markdown-content table { width: 100%; border-collapse: collapse; margin-bottom: 1rem; }
+        .markdown-content th, .markdown-content td { border: 1px solid var(--color-gray-300); padding: 0.5rem; text-align: left; }
+        html.dark .markdown-content th, html.dark .markdown-content td { border-color: var(--color-gray-700); }
+        .markdown-content th { background: var(--color-gray-100); }
+        html.dark .markdown-content th { background: var(--color-gray-800); }
+        /* Editor */
+        .editor-pane textarea {
+            width: 100%;
+            height: 100%;
+            resize: none;
+            border: none;
+            outline: none;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+            font-size: 0.875rem;
+            line-height: 1.6;
+            background: transparent;
+            color: inherit;
+            padding: 1rem;
+        }
+        /* Sidebar */
+        #sidebar {
+            background: var(--color-gray-50);
+        }
+        html.dark #sidebar {
+            background: var(--color-gray-950);
+        }
+        /* Active file in sidebar */
+        .file-tree-item a.active {
+            background: var(--color-blue-100);
+            color: var(--color-blue-700);
+        }
+        html.dark .file-tree-item a.active {
+            background: var(--color-blue-900);
+            color: var(--color-blue-300);
+        }
+        .file-tree-item a:hover, .file-tree-item summary:hover {
+            background: var(--color-gray-100);
+        }
+        html.dark .file-tree-item a:hover, html.dark .file-tree-item summary:hover {
+            background: var(--color-gray-800);
+        }
+        /* Folder/file icons */
+        .file-tree-item details > summary::-webkit-details-marker {
+            display: none;
+        }
+        /* Context menu */
+        #context-menu {
+            position: fixed;
+            z-index: 100;
+            min-width: 160px;
+            border-radius: 0.5rem;
+            padding: 0.25rem;
+            box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1);
+            background: var(--color-white);
+            border: 1px solid var(--color-gray-200);
+        }
+        html.dark #context-menu {
+            background: var(--color-gray-800);
+            border-color: var(--color-gray-700);
+        }
+        #context-menu button {
+            width: 100%;
+            text-align: left;
+            padding: 0.5rem 0.75rem;
+            border-radius: 0.375rem;
+            font-size: 0.875rem;
+            background: none;
+            border: none;
+            color: inherit;
+            cursor: pointer;
+        }
+        #context-menu button:hover {
+            background: var(--color-gray-100);
+        }
+        html.dark #context-menu button:hover {
+            background: var(--color-gray-700);
+        }
+        #context-menu .danger:hover {
+            color: var(--color-red-600);
+            background: var(--color-red-50);
+        }
+        html.dark #context-menu .danger:hover {
+            color: var(--color-red-400);
+            background: var(--color-red-950);
+        }
+        /* Sidebar collapsed */
+        #sidebar.collapsed {
+            width: 0;
+            min-width: 0;
+            overflow: hidden;
+            padding: 0;
+        }
+        /* Breadcrumbs */
+        .breadcrumbs {
+            font-size: 0.75rem;
+            color: var(--color-gray-500);
+        }
+        .breadcrumbs a {
+            color: inherit;
+            text-decoration: none;
+        }
+        .breadcrumbs a:hover {
+            color: var(--color-blue-600);
+        }
+        html.dark .breadcrumbs a:hover {
+            color: var(--color-blue-400);
+        }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: var(--color-gray-300); border-radius: 4px; }
+        html.dark ::-webkit-scrollbar-thumb { background: var(--color-gray-600); }
+        ::-webkit-scrollbar-thumb:hover { background: var(--color-gray-400); }
+    </style>
+    <script>
+        // Dark mode
+        (function() {
+            const saved = localStorage.getItem('theme');
+            const systemDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+            const isDark = saved === 'dark' || (saved === null && systemDark);
+            if (isDark) document.documentElement.classList.add('dark');
+            document.documentElement.setAttribute('data-theme', saved || 'system');
+        })();
+
+        function toggleTheme() {
+            const html = document.documentElement;
+            const current = html.getAttribute('data-theme');
+            let next;
+            if (current === 'system') next = 'dark';
+            else if (current === 'dark') next = 'light';
+            else next = 'system';
+
+            html.setAttribute('data-theme', next);
+            localStorage.setItem('theme', next);
+
+            const isDark = next === 'dark' || (next === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+            if (isDark) {
+                html.classList.add('dark');
+            } else {
+                html.classList.remove('dark');
+            }
+            document.body.style.background = isDark ? 'var(--color-gray-900)' : 'var(--color-white)';
+            document.body.style.color = isDark ? 'var(--color-gray-100)' : 'var(--color-gray-900)';
+        }
+
+        // Context menu
+        let contextTarget = null;
+        document.addEventListener('contextmenu', function(e) {
+            const item = e.target.closest('.file-tree-item a, .file-tree-item summary');
+            if (!item) return;
+            e.preventDefault();
+            contextTarget = item;
+            const menu = document.getElementById('context-menu');
+            menu.style.display = 'block';
+            // Position menu within viewport
+            let x = e.clientX;
+            let y = e.clientY;
+            const menuRect = menu.getBoundingClientRect();
+            if (x + menuRect.width > window.innerWidth) x = window.innerWidth - menuRect.width - 8;
+            if (y + menuRect.height > window.innerHeight) y = window.innerHeight - menuRect.height - 8;
+            menu.style.left = x + 'px';
+            menu.style.top = y + 'px';
+        });
+        document.addEventListener('click', function(e) {
+            const menu = document.getElementById('context-menu');
+            if (!menu.contains(e.target)) menu.style.display = 'none';
+        });
+        function ctxRename() {
+            if (!contextTarget) return;
+            const path = contextTarget.dataset.path || contextTarget.closest('a')?.dataset.path;
+            if (!path) return;
+            const newName = prompt('Rename to:', path);
+            if (newName && newName !== path) {
+                const form = new FormData();
+                form.append('old', path);
+                form.append('new', newName);
+                fetch('/rename', { method: 'POST', body: form })
+                    .then(() => { document.body.dispatchEvent(new Event('refreshTree')); });
+            }
+        }
+        function ctxDelete() {
+            if (!contextTarget) return;
+            const path = contextTarget.dataset.path || contextTarget.closest('a')?.dataset.path;
+            if (!path) return;
+            if (!confirm('Delete "' + path + '"?')) return;
+            const form = new FormData();
+            form.append('path', path);
+            fetch('/delete', { method: 'POST', body: form })
+                .then(() => { document.body.dispatchEvent(new Event('refreshTree')); });
+        }
+        function ctxNewNote() {
+            if (!contextTarget) return;
+            const path = contextTarget.dataset.path || contextTarget.closest('a')?.dataset.path;
+            if (!path) return;
+            const folder = contextTarget.closest('details') ? path : '';
+            const name = prompt('New note name:');
+            if (name) {
+                const fullPath = folder ? folder + '/' + name : name;
+                const form = new FormData();
+                form.append('path', fullPath);
+                fetch('/create-note', { method: 'POST', body: form })
+                    .then(r => { window.location.href = '/edit/' + fullPath; });
+            }
+        }
+
+        // Sidebar toggle
+        function toggleSidebar() {
+            document.getElementById('sidebar').classList.toggle('collapsed');
+        }
+
+        // Update page title
+        document.addEventListener('htmx:afterSettle', function(e) {
+            const titleEl = e.detail.elt.querySelector('[data-note-title]');
+            if (titleEl) {
+                document.title = titleEl.dataset.noteTitle + ' - Vitra';
+            }
+            
+            // Update sidebar active highlight
+            const path = window.location.pathname;
+            const noteMatch = path.match(/^\/(?:note|edit)\/(.+)$/);
+            if (noteMatch) {
+                const notePath = decodeURIComponent(noteMatch[1]);
+                document.querySelectorAll('.file-tree-item a').forEach(function(link) {
+                    link.classList.remove('active');
+                    const linkPath = link.getAttribute('data-path');
+                    if (linkPath === notePath) {
+                        link.classList.add('active');
+                        // Ensure parent folders are open
+                        let parent = link.closest('details');
+                        while (parent) {
+                            parent.open = true;
+                            parent = parent.parentElement.closest('details');
+                        }
+                    }
+                });
+            }
+        });
+    </script>
+</head>
+<body class="h-screen overflow-hidden" style="background: var(--color-white); color: var(--color-gray-900);">
+    <script>
+        (function() {
+            const isDark = document.documentElement.classList.contains('dark');
+            document.body.style.background = isDark ? 'var(--color-gray-900)' : 'var(--color-white)';
+            document.body.style.color = isDark ? 'var(--color-gray-100)' : 'var(--color-gray-900)';
+        })();
+    </script>
+    <div class="display-flex h-full">
+        <!-- Sidebar -->
+        <aside id="sidebar" class="display-flex flex-col" style="width: var(--sidebar-w); min-w: 0; transition: width 0.2s;">
+            <!-- Sidebar Header -->
+            <div class="display-flex items-center justify-between px py border-b" style="--px: 4; --py: 3; --border-b: var(--color-gray-200); --dark-border-b: var(--color-gray-800); height: var(--header-h);">
+                <button onclick="toggleSidebar()" class="p rounded-md" style="--p: 1.5;" data-fs title="Toggle sidebar">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+                </button>
+                <div class="display-flex gap-2">
+                    <button onclick="toggleTheme()" class="p rounded-md" style="--p: 1.5;" data-fs title="Toggle theme">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
+                    </button>
+                    <button hx-get="/search" hx-target="#main-content" hx-push-url="true" class="p rounded-md" style="--p: 1.5;" data-fs title="Search">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+                    </button>
+                </div>
+            </div>
+
+            <!-- New Note / Folder -->
+            <div class="display-flex gap-2 px py border-b" style="--px: 3; --py: 2; --gap: 2; --border-b: var(--color-gray-200); --dark-border-b: var(--color-gray-800);">
+                <button hx-get="/edit/new" hx-target="#main-content" class="display-flex items-center gap-1 px py rounded-md text-sm font-medium flex-1 justify-center" style="--px: 3; --py: 1.5; --gap: 1; --bg: var(--color-blue-600); --color: var(--color-white); --bg-hover: var(--color-blue-700);" data-fs>
+                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><line x1="9" y1="15" x2="15" y2="15"/></svg>
+                    New Note
+                </button>
+                <button onclick="document.getElementById('new-folder-dialog').showModal()" class="display-flex items-center gap-1 px py rounded-md text-sm font-medium" style="--px: 3; --py: 1.5; --gap: 1; --bg: var(--color-gray-100); --dark-bg: var(--color-gray-800); --color: var(--color-gray-700); --dark-color: var(--color-gray-300); --bg-hover: var(--color-gray-200); --dark-bg-hover: var(--color-gray-700);" data-fs>
+                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/><line x1="12" y1="10" x2="12" y2="16"/><line x1="9" y1="13" x2="15" y2="13"/></svg>
+                </button>
+            </div>
+
+            <!-- File Tree -->
+            <div id="file-tree" class="flex-1 overflow-y-auto p" style="--p: 2;" hx-get="/files?active={{.Path}}" hx-trigger="load, refreshTree from:body" hx-swap="innerHTML">
+                <div class="display-flex items-center justify-center h-full">
+                    <div class="animate-spin" style="--animate-spin: spin 1s linear infinite; width: 20px; height: 20px; border: 2px solid var(--color-gray-300); border-top-color: var(--color-blue-600); border-radius: 50%;"></div>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main Content -->
+        <main id="main-content" class="flex-1 overflow-hidden display-flex flex-col" style="background: var(--bg); color: var(--color);">
+            {{block "content" .}}<div class="display-flex items-center justify-center h-full"><p class="opacity-50">Select a note from the sidebar</p></div>{{end}}
+        </main>
+    </div>
+
+    <!-- Context Menu -->
+    <div id="context-menu" style="display:none;">
+        <button onclick="ctxNewNote()">New Note</button>
+        <button onclick="ctxRename()">Rename</button>
+        <button onclick="ctxDelete()" class="danger">Delete</button>
+    </div>
+
+    <!-- Rename Dialog -->
+    <dialog id="rename-dialog" class="rounded-lg p-0 border-0 shadow-lg" style="--rounded-lg: 0.5rem; --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1); background: var(--bg); color: var(--color);">
+        <form method="dialog" class="p-6 w-80">
+            <h3 class="font-semibold mb-4" style="--font-size: 1rem;">Rename</h3>
+            <input type="text" id="rename-input" class="w-full px py rounded-md border text-sm mb-4" style="--px: 3; --py: 2; --border: var(--color-gray-300); --dark-border: var(--color-gray-700); background: var(--bg); color: var(--color);" required>
+            <div class="display-flex justify-end gap-2">
+                <button type="button" onclick="document.getElementById('rename-dialog').close()" class="px py rounded-md text-sm" style="--px: 3; --py: 2;">Cancel</button>
+                <button type="submit" id="rename-confirm" class="px py rounded-md text-sm font-medium" style="--px: 3; --py: 2; --bg: var(--color-blue-600); --color: var(--color-white);" data-fs>Rename</button>
+            </div>
+        </form>
+    </dialog>
+
+    <!-- New Folder Dialog -->
+    <dialog id="new-folder-dialog" class="rounded-lg p-0 border-0 shadow-lg" style="--rounded-lg: 0.5rem; --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1); background: var(--bg); color: var(--color);">
+        <form method="dialog" class="p-6 w-80">
+            <h3 class="font-semibold mb-4" style="--font-size: 1rem;">New Folder</h3>
+            <input type="text" name="path" placeholder="folder/name" class="w-full px py rounded-md border text-sm mb-4" style="--px: 3; --py: 2; --border: var(--color-gray-300); --dark-border: var(--color-gray-700); background: var(--bg); color: var(--color);" required>
+            <div class="display-flex justify-end gap-2">
+                <button type="button" onclick="document.getElementById('new-folder-dialog').close()" class="px py rounded-md text-sm" style="--px: 3; --py: 2;">Cancel</button>
+                <button type="submit" hx-post="/create-folder" hx-include="previous input" hx-target="#file-tree" hx-swap="none" class="px py rounded-md text-sm font-medium" style="--px: 3; --py: 2; --bg: var(--color-blue-600); --color: var(--color-white);" data-fs>Create</button>
+            </div>
+        </form>
+    </dialog>
+</body>
+</html>

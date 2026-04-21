@@ -1,0 +1,210 @@
+{{define "content"}}
+<div class="h-full display-flex flex-col" data-note-path="{{.Path}}" data-note-title="{{.Title}}">
+    <!-- Breadcrumbs -->
+    <div class="display-flex items-center gap-1 px py border-b breadcrumbs" style="--px: 4; --py: 1; --border-b: var(--color-gray-200); --dark-border-b: var(--color-gray-800); height: 28px;">
+        {{range .Breadcrumbs}}
+        <a href="/note/{{.Path}}" hx-get="/note/{{.Path}}" hx-target="#main-content" hx-push-url="true">{{.Name}}</a>
+        <span class="opacity-50">/</span>
+        {{end}}
+        <span class="font-medium">{{.Title}}</span>
+    </div>
+
+    <!-- Toolbar -->
+    <div class="display-flex items-center justify-between px py border-b" style="--px: 4; --py: 2; --border-b: var(--color-gray-200); --dark-border-b: var(--color-gray-800); height: var(--header-h);">
+        <div class="display-flex items-center gap-3">
+            <h2 class="font-semibold text-sm truncate" style="--font-size: 0.875rem; max-width: 300px;">{{.Title}}</h2>
+            <span id="save-status" class="text-xs opacity-50" style="--opacity: 0.5;"></span>
+        </div>
+        <div class="display-flex items-center gap-2">
+            <button onclick="setNoteMode('view')" id="btn-view" class="px py rounded-md text-sm" style="--px: 3; --py: 1.5;" data-fs title="View mode">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+            </button>
+            <button onclick="setNoteMode('split')" id="btn-split" class="px py rounded-md text-sm" style="--px: 3; --py: 1.5;" data-fs title="Split mode">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><line x1="12" y1="3" x2="12" y2="21"/></svg>
+            </button>
+            <button onclick="setNoteMode('edit')" id="btn-edit" class="px py rounded-md text-sm" style="--px: 3; --py: 1.5;" data-fs title="Edit mode">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>
+            </button>
+        </div>
+    </div>
+
+    <!-- Content Area -->
+    <div class="flex-1 display-flex overflow-hidden" id="note-content-area">
+        <!-- Edit Pane -->
+        <div id="edit-pane" class="editor-pane flex-1 overflow-y-auto">
+            <textarea
+                id="note-source"
+                name="content"
+                hx-post="/save/{{.Path}}"
+                hx-trigger="keyup changed delay:500ms"
+                hx-swap="none"
+                hx-indicator="#save-status"
+                oninput="updateLivePreview(this.value)"
+            >{{.Content}}</textarea>
+        </div>
+
+        <!-- Divider -->
+        <div id="pane-divider" class="display-none" style="width: 4px; cursor: col-resize; background: transparent; align-items: center; justify-content: center; user-select: none; position: relative;" onmousedown="startResize(event)">
+            <div style="position: absolute; width: 16px; height: 32px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; background: var(--color-gray-300); border-radius: 3px;">
+                <div style="width: 3px; height: 3px; background: var(--color-gray-500); border-radius: 50%;"></div>
+                <div style="width: 3px; height: 3px; background: var(--color-gray-500); border-radius: 50%;"></div>
+                <div style="width: 3px; height: 3px; background: var(--color-gray-500); border-radius: 50%;"></div>
+            </div>
+        </div>
+
+        <!-- Preview Pane -->
+        <div id="preview-pane" class="flex-1 overflow-y-auto display-none" style="border-left: 1px solid var(--color-gray-200); --dark-border-left: var(--color-gray-800);">
+            <div id="live-preview" class="markdown-content" style="padding: 2rem 3rem;">
+                <!-- Live preview rendered here -->
+            </div>
+            <!-- Backlinks -->
+            <div class="px-12 pt-6 pb-12 border-t" style="--border-t: var(--color-gray-200); --dark-border-t: var(--color-gray-800);" hx-get="/backlinks/{{.Path}}" hx-trigger="load">
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    // Note mode: 'view', 'split', 'edit'
+    let currentMode = 'view';
+    let editWidthPercent = 50;
+    let isResizing = false;
+
+    function setNoteMode(mode) {
+        currentMode = mode;
+        const editPane = document.getElementById('edit-pane');
+        const previewPane = document.getElementById('preview-pane');
+        const divider = document.getElementById('pane-divider');
+        const btnView = document.getElementById('btn-view');
+        const btnSplit = document.getElementById('btn-split');
+        const btnEdit = document.getElementById('btn-edit');
+
+        // Reset button styles
+        [btnView, btnSplit, btnEdit].forEach(btn => {
+            btn.style.setProperty('--bg', '');
+            btn.style.setProperty('--color', '');
+        });
+
+        if (mode === 'view') {
+            editPane.classList.add('display-none');
+            editPane.classList.remove('flex-1');
+            editPane.style.width = '';
+            editPane.style.borderRight = '';
+            previewPane.classList.remove('display-none');
+            previewPane.classList.add('flex-1');
+            previewPane.style.width = '';
+            previewPane.style.borderLeft = '';
+            divider.classList.add('display-none');
+            btnView.style.setProperty('--bg', 'var(--color-blue-600)');
+            btnView.style.setProperty('--color', 'var(--color-white)');
+            // Render static content
+            renderStaticPreview();
+        } else if (mode === 'edit') {
+            editPane.classList.remove('display-none');
+            editPane.classList.add('flex-1');
+            editPane.style.width = '';
+            editPane.style.borderRight = '';
+            previewPane.classList.add('display-none');
+            previewPane.classList.remove('flex-1');
+            previewPane.style.width = '';
+            previewPane.style.borderLeft = '';
+            divider.classList.add('display-none');
+            btnEdit.style.setProperty('--bg', 'var(--color-blue-600)');
+            btnEdit.style.setProperty('--color', 'var(--color-white)');
+        } else if (mode === 'split') {
+            editPane.classList.remove('display-none');
+            editPane.classList.remove('flex-1');
+            editPane.style.width = editWidthPercent + '%';
+            editPane.style.borderRight = '';
+            previewPane.classList.remove('display-none');
+            previewPane.classList.remove('flex-1');
+            previewPane.style.width = (100 - editWidthPercent) + '%';
+            previewPane.style.borderLeft = '';
+            divider.classList.remove('display-none');
+            btnSplit.style.setProperty('--bg', 'var(--color-blue-600)');
+            btnSplit.style.setProperty('--color', 'var(--color-white)');
+            const textarea = document.getElementById('note-source');
+            updateLivePreview(textarea.value);
+        }
+
+        localStorage.setItem('noteMode', mode);
+    }
+
+    // Render static preview from server-rendered HTML
+    function renderStaticPreview() {
+        const previewDiv = document.getElementById('live-preview');
+        // The server provides the rendered HTML in a data attribute or we fetch it
+        // For now, we'll render from the textarea content
+        const textarea = document.getElementById('note-source');
+        updateLivePreview(textarea.value);
+    }
+
+    // Debounced preview update
+    let previewTimeout;
+    function updateLivePreview(content) {
+        clearTimeout(previewTimeout);
+        previewTimeout = setTimeout(() => {
+            const previewDiv = document.getElementById('live-preview');
+            const path = document.querySelector('[data-note-path]').dataset.notePath;
+            fetch('/preview/' + path, {
+                method: 'POST',
+                headers: { 'Content-Type': 'text/plain' },
+                body: content
+            })
+            .then(r => r.text())
+            .then(html => {
+                previewDiv.innerHTML = html;
+            });
+        }, 300);
+    }
+
+    // Divider resize
+    function startResize(e) {
+        isResizing = true;
+        document.body.style.cursor = 'col-resize';
+        document.body.style.userSelect = 'none';
+        
+        const container = document.getElementById('note-content-area');
+        const containerRect = container.getBoundingClientRect();
+        
+        function onMouseMove(e) {
+            if (!isResizing) return;
+            const x = e.clientX - containerRect.left;
+            const percent = (x / containerRect.width) * 100;
+            editWidthPercent = Math.max(20, Math.min(80, percent));
+            
+            const editPane = document.getElementById('edit-pane');
+            const previewPane = document.getElementById('preview-pane');
+            editPane.style.width = editWidthPercent + '%';
+            previewPane.style.width = (100 - editWidthPercent) + '%';
+        }
+        
+        function onMouseUp() {
+            isResizing = false;
+            document.body.style.cursor = '';
+            document.body.style.userSelect = '';
+            localStorage.setItem('splitRatio', editWidthPercent);
+            document.removeEventListener('mousemove', onMouseMove);
+            document.removeEventListener('mouseup', onMouseUp);
+        }
+        
+        document.addEventListener('mousemove', onMouseMove);
+        document.addEventListener('mouseup', onMouseUp);
+    }
+
+    // Restore saved mode and split ratio
+    const savedMode = localStorage.getItem('noteMode') || 'view';
+    const savedRatio = localStorage.getItem('splitRatio');
+    if (savedRatio) editWidthPercent = parseFloat(savedRatio);
+    setNoteMode(savedMode);
+
+    // HTMX save indicator
+    document.body.addEventListener('htmx:afterRequest', function(evt) {
+        if (evt.detail.target.id === 'save-status') {
+            const status = document.getElementById('save-status');
+            status.textContent = 'Saved';
+            setTimeout(() => { status.textContent = ''; }, 2000);
+        }
+    });
+</script>
+{{end}}
