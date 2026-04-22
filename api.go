@@ -1,8 +1,8 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
-	"html/template"
 	"io"
 	"net/http"
 	"os"
@@ -10,21 +10,22 @@ import (
 	"strings"
 )
 
-func handleIndex(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
-		http.NotFound(w, r)
-		return
-	}
+func writeJSON(w http.ResponseWriter, data interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(data)
+}
 
-	tmpl, err := template.ParseFiles("templates/layout.html")
+func (fs *FileSystem) handleAPIFileTree(w http.ResponseWriter, r *http.Request) {
+	activePath := r.URL.Query().Get("active")
+	tree, err := fs.buildTree(fs.VaultPath, activePath, 0)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	tmpl.ExecuteTemplate(w, "layout.html", nil)
+	writeJSON(w, tree)
 }
 
-func (fs *FileSystem) handleViewNote(w http.ResponseWriter, r *http.Request) {
+func (fs *FileSystem) handleAPIViewNote(w http.ResponseWriter, r *http.Request) {
 	path := r.PathValue("path")
 	if path == "" {
 		http.Error(w, "Note path required", http.StatusBadRequest)
@@ -35,16 +36,7 @@ func (fs *FileSystem) handleViewNote(w http.ResponseWriter, r *http.Request) {
 	content, err := os.ReadFile(fullPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			data := map[string]interface{}{
-				"Path": path,
-			}
-			if r.Header.Get("HX-Request") == "true" {
-				tmpl, _ := template.ParseFiles("templates/missing_note.html")
-				tmpl.Execute(w, data)
-				return
-			}
-			tmpl, _ := template.ParseFiles("templates/layout.html", "templates/missing_note.html")
-			tmpl.ExecuteTemplate(w, "layout.html", data)
+			http.Error(w, "Note not found", http.StatusNotFound)
 			return
 		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -58,54 +50,38 @@ func (fs *FileSystem) handleViewNote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	data := map[string]interface{}{
-		"Path":        path,
-		"Title":       filepath.Base(path),
-		"Content":     string(content),
-		"Frontmatter": frontmatter,
-		"HTML":        template.HTML(html),
-		"Breadcrumbs": buildBreadcrumbs(path),
-	}
-
-	if r.Header.Get("HX-Request") == "true" {
-		tmpl, _ := template.ParseFiles("templates/note.html")
-		tmpl.ExecuteTemplate(w, "content", data)
-		return
-	}
-
-	tmpl, _ := template.ParseFiles("templates/layout.html", "templates/note.html")
-	tmpl.ExecuteTemplate(w, "layout.html", data)
+	writeJSON(w, map[string]interface{}{
+		"path":        path,
+		"title":       filepath.Base(path),
+		"content":     string(content),
+		"frontmatter": frontmatter,
+		"html":        html,
+		"breadcrumbs": buildBreadcrumbs(path),
+	})
 }
 
-func (fs *FileSystem) handleEditNote(w http.ResponseWriter, r *http.Request) {
+func (fs *FileSystem) handleAPISaveNote(w http.ResponseWriter, r *http.Request) {
 	path := r.PathValue("path")
 	if path == "" {
 		http.Error(w, "Note path required", http.StatusBadRequest)
 		return
 	}
 
-	// Redirect /edit/ to /note/ for unified interface
-	http.Redirect(w, r, "/note/"+path, http.StatusSeeOther)
-}
-
-func (fs *FileSystem) handleSaveNote(w http.ResponseWriter, r *http.Request) {
-	path := r.PathValue("path")
-	if path == "" {
-		http.Error(w, "Note path required", http.StatusBadRequest)
+	content, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	defer r.Body.Close()
 
-	content := r.FormValue("content")
 	fullPath := filepath.Join(fs.VaultPath, path+".md")
-
-	// Ensure directory exists
 	dir := filepath.Dir(fullPath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	if err := os.WriteFile(fullPath, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(fullPath, content, 0644); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -114,14 +90,21 @@ func (fs *FileSystem) handleSaveNote(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("Saved"))
 }
 
-func (fs *FileSystem) handleCreateNote(w http.ResponseWriter, r *http.Request) {
-	path := r.FormValue("path")
-	if path == "" {
+func (fs *FileSystem) handleAPICreateNote(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Path string `json:"path"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if req.Path == "" {
 		http.Error(w, "Path required", http.StatusBadRequest)
 		return
 	}
 
-	fullPath := filepath.Join(fs.VaultPath, path+".md")
+	fullPath := filepath.Join(fs.VaultPath, req.Path+".md")
 	if _, err := os.Stat(fullPath); err == nil {
 		http.Error(w, "Note already exists", http.StatusConflict)
 		return
@@ -133,52 +116,66 @@ func (fs *FileSystem) handleCreateNote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	content := fmt.Sprintf("---\ntitle: %s\n---\n\n", filepath.Base(path))
+	content := fmt.Sprintf("---\ntitle: %s\n---\n\n", filepath.Base(req.Path))
 	if err := os.WriteFile(fullPath, []byte(content), 0644); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	w.Header().Set("HX-Redirect", "/note/"+path)
+	w.WriteHeader(http.StatusCreated)
 }
 
-func (fs *FileSystem) handleCreateFolder(w http.ResponseWriter, r *http.Request) {
-	path := r.FormValue("path")
-	if path == "" {
+func (fs *FileSystem) handleAPICreateFolder(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Path string `json:"path"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if req.Path == "" {
 		http.Error(w, "Path required", http.StatusBadRequest)
 		return
 	}
 
-	fullPath := filepath.Join(fs.VaultPath, path)
+	fullPath := filepath.Join(fs.VaultPath, req.Path)
 	if err := os.MkdirAll(fullPath, 0755); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	w.Header().Set("HX-Trigger", "refreshTree")
+	w.WriteHeader(http.StatusCreated)
 }
 
-func (fs *FileSystem) handleRename(w http.ResponseWriter, r *http.Request) {
-	oldPath := r.FormValue("old")
-	newPath := r.FormValue("new")
-	if oldPath == "" || newPath == "" {
+func (fs *FileSystem) handleAPIRename(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Old string `json:"old"`
+		New string `json:"new"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if req.Old == "" || req.New == "" {
 		http.Error(w, "Old and new paths required", http.StatusBadRequest)
 		return
 	}
 
-	oldFull := filepath.Join(fs.VaultPath, oldPath)
-	newFull := filepath.Join(fs.VaultPath, newPath)
+	oldFull := filepath.Join(fs.VaultPath, req.Old)
+	newFull := filepath.Join(fs.VaultPath, req.New)
 
 	if err := os.Rename(oldFull, newFull); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	w.Header().Set("HX-Trigger", "refreshTree")
+	w.WriteHeader(http.StatusOK)
 }
 
-func (fs *FileSystem) handleDelete(w http.ResponseWriter, r *http.Request) {
-	path := r.FormValue("path")
+func (fs *FileSystem) handleAPIDelete(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Query().Get("path")
 	if path == "" {
 		http.Error(w, "Path required", http.StatusBadRequest)
 		return
@@ -190,20 +187,13 @@ func (fs *FileSystem) handleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("HX-Trigger", "refreshTree")
-	w.Header().Set("HX-Redirect", "/")
+	w.WriteHeader(http.StatusOK)
 }
 
-func (fs *FileSystem) handleSearch(w http.ResponseWriter, r *http.Request) {
+func (fs *FileSystem) handleAPISearch(w http.ResponseWriter, r *http.Request) {
 	query := strings.ToLower(r.URL.Query().Get("q"))
 	if query == "" {
-		if r.Header.Get("HX-Request") == "true" {
-			tmpl, _ := template.ParseFiles("templates/search.html")
-			tmpl.ExecuteTemplate(w, "content", nil)
-			return
-		}
-		tmpl, _ := template.ParseFiles("templates/layout.html", "templates/search.html")
-		tmpl.ExecuteTemplate(w, "layout.html", nil)
+		writeJSON(w, []map[string]string{})
 		return
 	}
 
@@ -222,29 +212,17 @@ func (fs *FileSystem) handleSearch(w http.ResponseWriter, r *http.Request) {
 			rel, _ := filepath.Rel(fs.VaultPath, path)
 			rel = strings.TrimSuffix(filepath.ToSlash(rel), ".md")
 			results = append(results, map[string]string{
-				"Path":  rel,
-				"Title": strings.TrimSuffix(info.Name(), ".md"),
+				"path":  rel,
+				"title": strings.TrimSuffix(info.Name(), ".md"),
 			})
 		}
 		return nil
 	})
 
-	data := map[string]interface{}{
-		"Query":   query,
-		"Results": results,
-	}
-
-	if r.Header.Get("HX-Request") == "true" {
-		tmpl, _ := template.ParseFiles("templates/search.html")
-		tmpl.ExecuteTemplate(w, "content", data)
-		return
-	}
-
-	tmpl, _ := template.ParseFiles("templates/layout.html", "templates/search.html")
-	tmpl.ExecuteTemplate(w, "layout.html", data)
+	writeJSON(w, results)
 }
 
-func (fs *FileSystem) handleBacklinks(w http.ResponseWriter, r *http.Request) {
+func (fs *FileSystem) handleAPIBacklinks(w http.ResponseWriter, r *http.Request) {
 	path := r.PathValue("path")
 	if path == "" {
 		http.Error(w, "Path required", http.StatusBadRequest)
@@ -273,21 +251,18 @@ func (fs *FileSystem) handleBacklinks(w http.ResponseWriter, r *http.Request) {
 		pattern := "[[" + targetName + "]]"
 		if strings.Contains(string(content), pattern) {
 			backlinks = append(backlinks, map[string]string{
-				"Path":  rel,
-				"Title": strings.TrimSuffix(info.Name(), ".md"),
+				"path":  rel,
+				"title": strings.TrimSuffix(info.Name(), ".md"),
 			})
 		}
 		return nil
 	})
 
-	tmpl, _ := template.ParseFiles("templates/backlinks.html")
-	tmpl.Execute(w, map[string]interface{}{
-		"Path":      path,
-		"Backlinks": backlinks,
-	})
+	writeJSON(w, backlinks)
 }
 
-func (fs *FileSystem) handlePreview(w http.ResponseWriter, r *http.Request) {
+func (fs *FileSystem) handleAPIPreview(w http.ResponseWriter, r *http.Request) {
+	_ = r.PathValue("path") // path is part of route but not needed for preview
 	content, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)

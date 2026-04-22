@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -68,6 +69,14 @@ func (fs *FileSystem) buildTree(dir string, activePath string, depth int) ([]Fil
 
 		nodes = append(nodes, node)
 	}
+
+	// Sort: folders first, then alphabetically
+	sort.Slice(nodes, func(i, j int) bool {
+		if nodes[i].IsDir != nodes[j].IsDir {
+			return nodes[i].IsDir
+		}
+		return strings.ToLower(nodes[i].Name) < strings.ToLower(nodes[j].Name)
+	})
 
 	return nodes, nil
 }
