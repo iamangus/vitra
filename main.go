@@ -4,6 +4,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 )
 
 func main() {
@@ -14,18 +15,35 @@ func main() {
 
 	fs := NewFileSystem(vaultPath)
 
-	http.HandleFunc("GET /", handleIndex)
-	http.HandleFunc("GET /files", fs.handleFileTree)
-	http.HandleFunc("GET /note/{path...}", fs.handleViewNote)
-	http.HandleFunc("GET /edit/{path...}", fs.handleEditNote)
-	http.HandleFunc("POST /save/{path...}", fs.handleSaveNote)
-	http.HandleFunc("POST /create-note", fs.handleCreateNote)
-	http.HandleFunc("POST /create-folder", fs.handleCreateFolder)
-	http.HandleFunc("POST /rename", fs.handleRename)
-	http.HandleFunc("POST /delete", fs.handleDelete)
-	http.HandleFunc("GET /search", fs.handleSearch)
-	http.HandleFunc("GET /backlinks/{path...}", fs.handleBacklinks)
-	http.HandleFunc("POST /preview/{path...}", fs.handlePreview)
+	// API routes
+	http.HandleFunc("GET /api/files", fs.handleAPIFileTree)
+	http.HandleFunc("GET /api/note/{path...}", fs.handleAPIViewNote)
+	http.HandleFunc("POST /api/note/{path...}", fs.handleAPISaveNote)
+	http.HandleFunc("POST /api/notes", fs.handleAPICreateNote)
+	http.HandleFunc("POST /api/folders", fs.handleAPICreateFolder)
+	http.HandleFunc("PUT /api/rename", fs.handleAPIRename)
+	http.HandleFunc("DELETE /api/delete", fs.handleAPIDelete)
+	http.HandleFunc("GET /api/search", fs.handleAPISearch)
+	http.HandleFunc("GET /api/backlinks/{path...}", fs.handleAPIBacklinks)
+	http.HandleFunc("POST /api/preview/{path...}", fs.handleAPIPreview)
+
+	// Serve static files from frontend/dist
+	staticDir := "./frontend/dist"
+	fsys := http.Dir(staticDir)
+	fileServer := http.FileServer(fsys)
+
+	// SPA fallback: serve index.html for non-API, non-file routes
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		// Check if the file exists in dist
+		path := filepath.Join(staticDir, r.URL.Path)
+		_, err := os.Stat(path)
+		if os.IsNotExist(err) || r.URL.Path == "/" {
+			// Serve index.html for SPA routes
+			http.ServeFile(w, r, filepath.Join(staticDir, "index.html"))
+			return
+		}
+		fileServer.ServeHTTP(w, r)
+	})
 
 	port := os.Getenv("PORT")
 	if port == "" {

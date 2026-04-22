@@ -9,11 +9,7 @@ import (
 	"strings"
 
 	"github.com/yuin/goldmark"
-	"github.com/yuin/goldmark/ast"
-	"github.com/yuin/goldmark/parser"
 	"github.com/yuin/goldmark/renderer/html"
-	"github.com/yuin/goldmark/text"
-	"github.com/yuin/goldmark/util"
 )
 
 var (
@@ -162,31 +158,3 @@ func buildBreadcrumbs(path string) []map[string]string {
 	}
 	return crumbs
 }
-
-type wikiLinkParser struct{}
-
-func (w *wikiLinkParser) Trigger() []byte {
-	return []byte{'['}
-}
-
-func (w *wikiLinkParser) Parse(_ ast.Node, block text.Reader, _ parser.Context) ast.Node {
-	line, _ := block.PeekLine()
-	if !bytes.HasPrefix(line, []byte("[[")) {
-		return nil
-	}
-	end := bytes.Index(line[2:], []byte("]]"))
-	if end < 0 {
-		return nil
-	}
-	end += 2
-
-	content := string(line[2:end])
-	block.Advance(end + 2)
-
-	node := ast.NewLink()
-	node.Destination = util.URLEscape([]byte(content), true)
-	node.AppendChild(node, ast.NewString([]byte(content)))
-	return node
-}
-
-var defaultWikiLinkParser = &wikiLinkParser{}
