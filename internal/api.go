@@ -1,4 +1,4 @@
-package main
+package internal
 
 import (
 	"encoding/json"
@@ -15,7 +15,7 @@ func writeJSON(w http.ResponseWriter, data interface{}) {
 	json.NewEncoder(w).Encode(data)
 }
 
-func (fs *FileSystem) handleAPIFileTree(w http.ResponseWriter, r *http.Request) {
+func (fs *FileSystem) HandleAPIFileTree(w http.ResponseWriter, r *http.Request) {
 	activePath := r.URL.Query().Get("active")
 	tree, err := fs.buildTree(fs.VaultPath, activePath, 0)
 	if err != nil {
@@ -25,7 +25,7 @@ func (fs *FileSystem) handleAPIFileTree(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, tree)
 }
 
-func (fs *FileSystem) handleAPIViewNote(w http.ResponseWriter, r *http.Request) {
+func (fs *FileSystem) HandleAPIViewNote(w http.ResponseWriter, r *http.Request) {
 	path := r.PathValue("path")
 	if path == "" {
 		http.Error(w, "Note path required", http.StatusBadRequest)
@@ -60,7 +60,7 @@ func (fs *FileSystem) handleAPIViewNote(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
-func (fs *FileSystem) handleAPISaveNote(w http.ResponseWriter, r *http.Request) {
+func (fs *FileSystem) HandleAPISaveNote(w http.ResponseWriter, r *http.Request) {
 	path := r.PathValue("path")
 	if path == "" {
 		http.Error(w, "Note path required", http.StatusBadRequest)
@@ -90,7 +90,7 @@ func (fs *FileSystem) handleAPISaveNote(w http.ResponseWriter, r *http.Request) 
 	w.Write([]byte("Saved"))
 }
 
-func (fs *FileSystem) handleAPICreateNote(w http.ResponseWriter, r *http.Request) {
+func (fs *FileSystem) HandleAPICreateNote(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Path string `json:"path"`
 	}
@@ -125,7 +125,7 @@ func (fs *FileSystem) handleAPICreateNote(w http.ResponseWriter, r *http.Request
 	w.WriteHeader(http.StatusCreated)
 }
 
-func (fs *FileSystem) handleAPICreateFolder(w http.ResponseWriter, r *http.Request) {
+func (fs *FileSystem) HandleAPICreateFolder(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Path string `json:"path"`
 	}
@@ -148,7 +148,7 @@ func (fs *FileSystem) handleAPICreateFolder(w http.ResponseWriter, r *http.Reque
 	w.WriteHeader(http.StatusCreated)
 }
 
-func (fs *FileSystem) handleAPIRename(w http.ResponseWriter, r *http.Request) {
+func (fs *FileSystem) HandleAPIRename(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Old string `json:"old"`
 		New string `json:"new"`
@@ -174,7 +174,7 @@ func (fs *FileSystem) handleAPIRename(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-func (fs *FileSystem) handleAPIDelete(w http.ResponseWriter, r *http.Request) {
+func (fs *FileSystem) HandleAPIDelete(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Query().Get("path")
 	if path == "" {
 		http.Error(w, "Path required", http.StatusBadRequest)
@@ -190,7 +190,7 @@ func (fs *FileSystem) handleAPIDelete(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-func (fs *FileSystem) handleAPISearch(w http.ResponseWriter, r *http.Request) {
+func (fs *FileSystem) HandleAPISearch(w http.ResponseWriter, r *http.Request) {
 	query := strings.ToLower(r.URL.Query().Get("q"))
 	if query == "" {
 		writeJSON(w, []map[string]string{})
@@ -222,7 +222,7 @@ func (fs *FileSystem) handleAPISearch(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, results)
 }
 
-func (fs *FileSystem) handleAPIBacklinks(w http.ResponseWriter, r *http.Request) {
+func (fs *FileSystem) HandleAPIBacklinks(w http.ResponseWriter, r *http.Request) {
 	path := r.PathValue("path")
 	if path == "" {
 		http.Error(w, "Path required", http.StatusBadRequest)
@@ -261,7 +261,7 @@ func (fs *FileSystem) handleAPIBacklinks(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, backlinks)
 }
 
-func (fs *FileSystem) handleAPIPreview(w http.ResponseWriter, r *http.Request) {
+func (fs *FileSystem) HandleAPIPreview(w http.ResponseWriter, r *http.Request) {
 	_ = r.PathValue("path") // path is part of route but not needed for preview
 	content, err := io.ReadAll(r.Body)
 	if err != nil {

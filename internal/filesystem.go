@@ -1,8 +1,6 @@
-package main
+package internal
 
 import (
-	"html/template"
-	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -79,16 +77,4 @@ func (fs *FileSystem) buildTree(dir string, activePath string, depth int) ([]Fil
 	})
 
 	return nodes, nil
-}
-
-func (fs *FileSystem) handleFileTree(w http.ResponseWriter, r *http.Request) {
-	activePath := r.URL.Query().Get("active")
-	tree, err := fs.buildTree(fs.VaultPath, activePath, 0)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	tmpl, _ := template.ParseFiles("templates/file_tree.html")
-	tmpl.Execute(w, tree)
 }
