@@ -2,6 +2,9 @@
 vitra
 *.exe
 
+# Allow cmd/vitra/ directory (matches binary name above)
+!cmd/vitra/
+
 # Air live reload
 tmp/
 
