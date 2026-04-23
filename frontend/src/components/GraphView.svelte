@@ -17,29 +17,38 @@
   let loading = $state(true);
   let error = $state(null);
 
-  // Viewport
+  // Viewport + interaction
   let transform = $state({ x: 0, y: 0, k: 1 });
   let isDragging = $state(false);
   let dragNode = $state(null);
   let hoverNode = $state(null);
+  let selectedNodeId = $state(null);
   let mousePos = $state({ x: 0, y: 0 });
   let dragStartPos = $state({ x: 0, y: 0 });
   let movedDuringDrag = $state(false);
   let suppressClick = $state(false);
 
-  // Simulation params
-  const REPULSION = 5000;
-  const SPRING_LENGTH = 250;
-  const SPRING_STRENGTH = 0.15;
-  const DAMPING = 0.92;
-  const CENTER_FORCE = 0.01;
-  const MAX_SPEED = 4;
+  // Adaptive simulation config
+  let simConfig = $state({
+    repulsion: 5000,
+    springLength: 250,
+    springStrength: 0.15,
+    damping: 0.92,
+    centerForce: 0.01,
+    maxSpeed: 4,
+    preTicks: 300,
+    fitPadding: 120,
+    labelZoomThreshold: 0.95,
+    detailZoomThreshold: 1.45,
+    backgroundLabelLimit: 12,
+    idleLabelDegreeThreshold: 4,
+    edgeOpacity: 0.28,
+  });
 
   let animationId = $state(null);
   let resizeObserver = $state(null);
   let simRunning = $state(false);
 
-  // Initialize
   $effect(() => {
     dpr = window.devicePixelRatio || 1;
     loadGraph();
@@ -50,7 +59,6 @@
     };
   });
 
-  // Setup canvas when element is bound
   $effect(() => {
     if (!canvas || !container) return;
 
@@ -61,6 +69,9 @@
 
     resizeObserver = new ResizeObserver(() => {
       resizeCanvas();
+      if (nodes.length > 0) {
+        fitGraphToViewport(0.86);
+      }
     });
     resizeObserver.observe(container);
 
@@ -89,13 +100,24 @@
     };
   });
 
-  // Start simulation when we have data and context
   $effect(() => {
     if (nodes.length > 0 && ctx && !simRunning && canvas) {
       simRunning = true;
       startSimulation();
     }
   });
+
+  function clamp(value, min, max) {
+    return Math.max(min, Math.min(max, value));
+  }
+
+  function hashString(value) {
+    let hash = 0;
+    for (let i = 0; i < value.length; i++) {
+      hash = (hash * 31 + value.charCodeAt(i)) >>> 0;
+    }
+    return hash;
+  }
 
   function resizeCanvas() {
     if (!canvas || !container || !ctx) return;
@@ -125,54 +147,112 @@
     }
   }
 
+  function buildSimConfig(nodeCount, linkCount) {
+    const safeNodeCount = Math.max(1, nodeCount);
+    const avgDegree = nodeCount > 0 ? (2 * linkCount) / nodeCount : 0;
+    const maxPossibleLinks = nodeCount > 1 ? (nodeCount * (nodeCount - 1)) / 2 : 1;
+    const density = linkCount / Math.max(1, maxPossibleLinks);
+
+    return {
+      repulsion: 4200 + safeNodeCount * 180 + density * 18000,
+      springLength: 170 + Math.sqrt(safeNodeCount) * 16 + avgDegree * 9,
+      springStrength: clamp(0.1 - density * 0.08, 0.018, 0.09),
+      damping: clamp(0.91 - density * 0.05, 0.84, 0.92),
+      centerForce: clamp(0.006 - safeNodeCount * 0.00003 - density * 0.002, 0.0012, 0.0045),
+      maxSpeed: clamp(3 + Math.sqrt(safeNodeCount) * 0.18, 3, 7),
+      preTicks: Math.round(clamp(220 + safeNodeCount * 7 + linkCount * 0.7, 220, 1200)),
+      fitPadding: Math.round(120 + Math.sqrt(safeNodeCount) * 18 + avgDegree * 6),
+      labelZoomThreshold: safeNodeCount > 60 ? 1.1 : 0.9,
+      detailZoomThreshold: safeNodeCount > 60 ? 1.55 : 1.25,
+      backgroundLabelLimit: Math.round(clamp(Math.sqrt(safeNodeCount) * 1.5, 8, 20)),
+      idleLabelDegreeThreshold: Math.max(4, Math.ceil(avgDegree)),
+      edgeOpacity: clamp(0.28 - density * 0.1, 0.1, 0.28),
+    };
+  }
+
+  function seedNodePositions(newNodes, nextConfig) {
+    const orderedNodes = [...newNodes].sort((a, b) => b.links - a.links || a.id.localeCompare(b.id));
+    const baseSpacing = 95 + Math.sqrt(newNodes.length) * 14 + nextConfig.springLength * 0.18;
+    let ring = 0;
+    let indexInRing = 0;
+    let ringCapacity = Math.max(1, Math.round(Math.sqrt(newNodes.length)));
+
+    for (const node of orderedNodes) {
+      if (indexInRing >= ringCapacity) {
+        ring += 1;
+        indexInRing = 0;
+        ringCapacity = Math.max(6, Math.round(Math.sqrt(newNodes.length) * (ring + 1) * 0.9));
+      }
+
+      const angle = ringCapacity === 1
+        ? 0
+        : (indexInRing / ringCapacity) * Math.PI * 2 + ring * 0.45;
+      const ringRadius = ring * baseSpacing;
+      const jitterSeed = hashString(node.id);
+      const jitter = Math.min(26, 8 + ring * 2);
+      const jitterX = ((((jitterSeed & 1023) / 1023) * 2) - 1) * jitter;
+      const jitterY = (((((jitterSeed >> 10) & 1023) / 1023) * 2) - 1) * jitter;
+
+      node.x = Math.cos(angle) * ringRadius + jitterX;
+      node.y = Math.sin(angle) * ringRadius + jitterY;
+      node.vx = 0;
+      node.vy = 0;
+
+      indexInRing += 1;
+    }
+  }
+
   function initGraph(data) {
     const nextNodeIndexById = new Map();
-    const newNodes = data.nodes.map((n, i) => ({
+    const newNodes = data.nodes.map((n) => ({
       id: n.id,
       title: n.title,
-      // Place nodes on a circle to guarantee separation
-      x: Math.cos((i / data.nodes.length) * Math.PI * 2) * 100,
-      y: Math.sin((i / data.nodes.length) * Math.PI * 2) * 100,
+      x: 0,
+      y: 0,
       vx: 0,
       vy: 0,
       radius: 4,
       links: 0,
     }));
 
-    for (const n of newNodes) {
-      nextNodeIndexById.set(n.id, nextNodeIndexById.size);
-    }
-
-    const newLinks = data.links.map(l => ({
-      sourceId: l.source,
-      targetId: l.target,
-    })).filter(l => nextNodeIndexById.has(l.sourceId) && nextNodeIndexById.has(l.targetId));
-
-    // Count links per node and set radius by centrality
-    for (const link of newLinks) {
-      const s = newNodes[nextNodeIndexById.get(link.sourceId)];
-      const t = newNodes[nextNodeIndexById.get(link.targetId)];
-      if (s) s.links++;
-      if (t) t.links++;
-    }
-    const maxLinks = Math.max(1, ...newNodes.map(n => n.links));
     for (const node of newNodes) {
-      node.radius = 3 + (node.links / maxLinks) * 6;
+      nextNodeIndexById.set(node.id, nextNodeIndexById.size);
     }
+
+    const newLinks = data.links.map((link) => ({
+      sourceId: link.source,
+      targetId: link.target,
+    })).filter((link) => nextNodeIndexById.has(link.sourceId) && nextNodeIndexById.has(link.targetId));
+
+    for (const link of newLinks) {
+      const source = newNodes[nextNodeIndexById.get(link.sourceId)];
+      const target = newNodes[nextNodeIndexById.get(link.targetId)];
+      if (source) source.links += 1;
+      if (target) target.links += 1;
+    }
+
+    const maxLinks = Math.max(1, ...newNodes.map((node) => node.links));
+    for (const node of newNodes) {
+      node.radius = 3 + (node.links / maxLinks) * 7;
+    }
+
+    const nextConfig = buildSimConfig(newNodes.length, newLinks.length);
+    seedNodePositions(newNodes, nextConfig);
 
     nodes = newNodes;
     links = newLinks;
     nodeIndexById = nextNodeIndexById;
+    simConfig = nextConfig;
+    selectedNodeId = null;
+    hoverNode = null;
   }
 
   function startSimulation() {
-    // Run 300 ticks of simulation instantly (no rendering) to settle the layout
-    for (let i = 0; i < 300; i++) {
+    for (let i = 0; i < simConfig.preTicks; i++) {
       simulate(1);
     }
 
-    // Compute fit-to-view transform based on settled positions
-    computeInitialTransform();
+    fitGraphToViewport(0.86);
 
     let lastTime = performance.now();
 
@@ -190,24 +270,43 @@
     animationId = requestAnimationFrame(tick);
   }
 
-  function computeInitialTransform() {
-    if (nodes.length === 0 || !canvas) return;
-    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  function getBounds(padding = simConfig.fitPadding) {
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minY = Infinity;
+    let maxY = -Infinity;
+
     for (const node of nodes) {
-      minX = Math.min(minX, node.x);
-      maxX = Math.max(maxX, node.x);
-      minY = Math.min(minY, node.y);
-      maxY = Math.max(maxY, node.y);
+      minX = Math.min(minX, node.x - node.radius);
+      maxX = Math.max(maxX, node.x + node.radius);
+      minY = Math.min(minY, node.y - node.radius);
+      maxY = Math.max(maxY, node.y + node.radius);
     }
+
+    return {
+      minX: minX - padding,
+      maxX: maxX + padding,
+      minY: minY - padding,
+      maxY: maxY + padding,
+    };
+  }
+
+  function fitGraphToViewport(fill = 0.9) {
+    if (nodes.length === 0 || !canvas) return;
+
+    const bounds = getBounds();
     const rect = canvas.getBoundingClientRect();
-    const graphW = maxX - minX + 100;
-    const graphH = maxY - minY + 100;
+    const graphW = Math.max(1, bounds.maxX - bounds.minX);
+    const graphH = Math.max(1, bounds.maxY - bounds.minY);
     const scale = Math.min(rect.width / graphW, rect.height / graphH, 2);
-    const k = Math.max(0.1, scale * 0.85);
+    const k = Math.max(0.08, scale * fill);
+    const centerX = (bounds.minX + bounds.maxX) / 2;
+    const centerY = (bounds.minY + bounds.maxY) / 2;
+
     transform = {
       k,
-      x: rect.width / 2 - (minX + maxX) / 2 * k,
-      y: rect.height / 2 - (minY + maxY) / 2 * k,
+      x: rect.width / 2 - centerX * k,
+      y: rect.height / 2 - centerY * k,
     };
   }
 
@@ -215,7 +314,6 @@
     const cx = 0;
     const cy = 0;
 
-    // Repulsion
     for (let i = 0; i < nodes.length; i++) {
       for (let j = i + 1; j < nodes.length; j++) {
         const a = nodes[i];
@@ -223,7 +321,7 @@
         let dx = a.x - b.x;
         let dy = a.y - b.y;
         let dist = Math.sqrt(dx * dx + dy * dy) || 1;
-        const force = (REPULSION * dt) / (dist * dist);
+        const force = (simConfig.repulsion * dt) / (dist * dist);
         const fx = (dx / dist) * force;
         const fy = (dy / dist) * force;
         a.vx += fx;
@@ -233,7 +331,6 @@
       }
     }
 
-    // Spring attraction
     for (const link of links) {
       const a = nodes[nodeIndexById.get(link.sourceId)];
       const b = nodes[nodeIndexById.get(link.targetId)];
@@ -241,7 +338,7 @@
       let dx = b.x - a.x;
       let dy = b.y - a.y;
       let dist = Math.sqrt(dx * dx + dy * dy) || 1;
-      const force = (dist - SPRING_LENGTH) * SPRING_STRENGTH * dt;
+      const force = (dist - simConfig.springLength) * simConfig.springStrength * dt;
       const fx = (dx / dist) * force;
       const fy = (dy / dist) * force;
       a.vx += fx;
@@ -250,18 +347,17 @@
       b.vy -= fy;
     }
 
-    // Center gravity + damping + speed limit + position update
     for (const node of nodes) {
-      node.vx += (cx - node.x) * CENTER_FORCE * dt;
-      node.vy += (cy - node.y) * CENTER_FORCE * dt;
+      node.vx += (cx - node.x) * simConfig.centerForce * dt;
+      node.vy += (cy - node.y) * simConfig.centerForce * dt;
 
-      node.vx *= DAMPING;
-      node.vy *= DAMPING;
+      node.vx *= simConfig.damping;
+      node.vy *= simConfig.damping;
 
       const speed = Math.sqrt(node.vx * node.vx + node.vy * node.vy);
-      if (speed > MAX_SPEED) {
-        node.vx = (node.vx / speed) * MAX_SPEED;
-        node.vy = (node.vy / speed) * MAX_SPEED;
+      if (speed > simConfig.maxSpeed) {
+        node.vx = (node.vx / speed) * simConfig.maxSpeed;
+        node.vy = (node.vy / speed) * simConfig.maxSpeed;
       }
 
       node.x += node.vx * dt;
@@ -269,113 +365,195 @@
     }
   }
 
+  function getConnectedIds(focusId) {
+    const connectedIds = new Set();
+    if (!focusId) return connectedIds;
+
+    connectedIds.add(focusId);
+    for (const link of links) {
+      if (link.sourceId === focusId) {
+        connectedIds.add(link.targetId);
+      } else if (link.targetId === focusId) {
+        connectedIds.add(link.sourceId);
+      }
+    }
+    return connectedIds;
+  }
+
+  function getVisibleWorldRect(width, height) {
+    return {
+      minX: (-transform.x) / transform.k,
+      maxX: (width - transform.x) / transform.k,
+      minY: (-transform.y) / transform.k,
+      maxY: (height - transform.y) / transform.k,
+    };
+  }
+
+  function isNodeVisible(node, rect) {
+    return node.x + node.radius >= rect.minX
+      && node.x - node.radius <= rect.maxX
+      && node.y + node.radius >= rect.minY
+      && node.y - node.radius <= rect.maxY;
+  }
+
+  function rectsOverlap(a, b) {
+    return a.x < b.x + b.w
+      && a.x + a.w > b.x
+      && a.y < b.y + b.h
+      && a.y + a.h > b.y;
+  }
+
   function render() {
     if (!ctx || !canvas) return;
 
     const rect = canvas.getBoundingClientRect();
-    const w = rect.width;
-    const h = rect.height;
+    const width = rect.width;
+    const height = rect.height;
+    const isDark = document.documentElement.classList.contains('dark');
 
-    // Clear with background color to ensure visibility
-    ctx.fillStyle = document.documentElement.classList.contains('dark') ? '#0a0a0c' : '#fafafa';
-    ctx.fillRect(0, 0, w, h);
+    ctx.fillStyle = isDark ? '#0a0a0c' : '#fafafa';
+    ctx.fillRect(0, 0, width, height);
 
     ctx.save();
     ctx.translate(transform.x, transform.y);
     ctx.scale(transform.k, transform.k);
 
-    // Colors
-    const isDark = document.documentElement.classList.contains('dark');
-    const linkColor = isDark ? 'rgba(139, 139, 152, 0.3)' : 'rgba(161, 161, 171, 0.4)';
+    const selectedConnectedIds = getConnectedIds(selectedNodeId);
+    const hoverConnectedIds = getConnectedIds(hoverNode?.id || '');
+    const hasSelection = selectedConnectedIds.size > 0;
+    const visibleWorld = getVisibleWorldRect(width, height);
+    const baseLinkAlpha = simConfig.edgeOpacity;
+
+    const defaultLinkColor = isDark
+      ? `rgba(139, 139, 152, ${baseLinkAlpha})`
+      : `rgba(161, 161, 171, ${baseLinkAlpha})`;
+    const dimLinkColor = isDark ? 'rgba(139, 139, 152, 0.05)' : 'rgba(161, 161, 171, 0.08)';
     const nodeColor = isDark ? '#a855f7' : '#7c3aed';
     const hoverColor = isDark ? '#c084fc' : '#6d28d9';
-    const textColor = isDark ? 'rgba(240, 240, 245, 0.9)' : 'rgba(26, 26, 30, 0.9)';
+    const dimNodeColor = isDark ? 'rgba(168, 85, 247, 0.2)' : 'rgba(124, 58, 237, 0.2)';
+    const textColor = isDark ? 'rgba(240, 240, 245, 0.92)' : 'rgba(26, 26, 30, 0.92)';
+    const mutedTextColor = isDark ? 'rgba(240, 240, 245, 0.78)' : 'rgba(26, 26, 30, 0.78)';
 
-    // Highlight connected links if hovering
-    const connectedIds = new Set();
-    if (hoverNode) {
-      connectedIds.add(hoverNode.id);
-      for (const link of links) {
-        if (link.sourceId === hoverNode.id || link.targetId === hoverNode.id) {
-          connectedIds.add(link.sourceId);
-          connectedIds.add(link.targetId);
-        }
-      }
+    for (const link of links) {
+      const source = nodes[nodeIndexById.get(link.sourceId)];
+      const target = nodes[nodeIndexById.get(link.targetId)];
+      if (!source || !target) continue;
+
+      const touchesSelection = selectedNodeId && (link.sourceId === selectedNodeId || link.targetId === selectedNodeId);
+      const touchesHover = hoverNode && (link.sourceId === hoverNode.id || link.targetId === hoverNode.id);
+
+      ctx.beginPath();
+      ctx.moveTo(source.x, source.y);
+      ctx.lineTo(target.x, target.y);
+      ctx.strokeStyle = touchesHover
+        ? (isDark ? 'rgba(192, 132, 252, 0.78)' : 'rgba(109, 40, 217, 0.75)')
+        : (touchesSelection
+          ? (isDark ? 'rgba(168, 85, 247, 0.68)' : 'rgba(124, 58, 237, 0.68)')
+          : (hasSelection ? dimLinkColor : defaultLinkColor));
+      ctx.lineWidth = touchesHover ? 1.8 : (touchesSelection ? 1.5 : 1);
+      ctx.stroke();
     }
 
-    // Draw nodes
     for (const node of nodes) {
-      const highlighted = connectedIds.has(node.id);
+      const isSelected = node.id === selectedNodeId;
       const isHover = node.id === hoverNode?.id;
+      const linkedToSelection = selectedConnectedIds.has(node.id);
+      const linkedToHover = hoverConnectedIds.has(node.id);
+      const dimmed = hasSelection && !linkedToSelection;
 
       ctx.beginPath();
       ctx.arc(node.x, node.y, node.radius, 0, Math.PI * 2);
       ctx.fillStyle = isHover
         ? hoverColor
-        : (highlighted ? nodeColor : (isDark ? 'rgba(168, 85, 247, 0.8)' : 'rgba(124, 58, 237, 0.8)'));
+        : (isSelected || linkedToSelection || linkedToHover ? nodeColor : (dimmed ? dimNodeColor : (isDark ? 'rgba(168, 85, 247, 0.82)' : 'rgba(124, 58, 237, 0.82)')));
       ctx.fill();
 
-      if (isHover || (highlighted && node.links > 2)) {
+      if (isSelected || isHover || linkedToSelection) {
         ctx.beginPath();
         ctx.arc(node.x, node.y, node.radius + 3, 0, Math.PI * 2);
-        ctx.strokeStyle = isDark ? 'rgba(168, 85, 247, 0.5)' : 'rgba(124, 58, 237, 0.5)';
-        ctx.lineWidth = 1;
+        ctx.strokeStyle = isHover
+          ? (isDark ? 'rgba(192, 132, 252, 0.65)' : 'rgba(109, 40, 217, 0.65)')
+          : (isDark ? 'rgba(168, 85, 247, 0.55)' : 'rgba(124, 58, 237, 0.55)');
+        ctx.lineWidth = isSelected ? 1.6 : 1;
         ctx.stroke();
       }
     }
 
-    // Draw links after nodes so the anchor point is visibly the node center.
-    ctx.lineCap = 'round';
-    for (const link of links) {
-      const source = nodes[nodeIndexById.get(link.sourceId)];
-      const target = nodes[nodeIndexById.get(link.targetId)];
-      if (!source || !target) continue;
-      const highlighted = hoverNode && (link.sourceId === hoverNode.id || link.targetId === hoverNode.id);
-      ctx.beginPath();
-      ctx.moveTo(source.x, source.y);
-      ctx.lineTo(target.x, target.y);
-      ctx.strokeStyle = highlighted
-        ? (isDark ? 'rgba(168, 85, 247, 0.7)' : 'rgba(124, 58, 237, 0.7)')
-        : linkColor;
-      ctx.lineWidth = highlighted ? 1.5 : 1;
-      ctx.stroke();
-    }
-
-    // Draw labels for hovered node and high-centrality nodes
     ctx.font = `${12 / transform.k}px -apple-system, BlinkMacSystemFont, sans-serif`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
 
+    const primaryCandidates = [];
+    const backgroundCandidates = [];
+
     for (const node of nodes) {
-      const shouldLabel = node.id === hoverNode?.id || node.links >= Math.max(3, nodes.length * 0.02);
-      if (!shouldLabel) continue;
+      if (!isNodeVisible(node, visibleWorld)) continue;
 
-      const highlighted = connectedIds.has(node.id);
-      const padding = 4 / transform.k;
-      const textY = node.y - node.radius / transform.k - 10 / transform.k;
-      const metrics = ctx.measureText(node.title);
-      const textW = metrics.width;
+      const isSelected = node.id === selectedNodeId;
+      const isHover = node.id === hoverNode?.id;
+      const linkedToSelection = selectedConnectedIds.has(node.id) && !isSelected;
+      const linkedToHover = hoverConnectedIds.has(node.id) && !isHover;
 
-      // Label background
-      ctx.fillStyle = isDark ? 'rgba(10, 10, 12, 0.85)' : 'rgba(250, 250, 250, 0.9)';
+      if (isHover) {
+        primaryCandidates.push({ node, priority: 1000, force: true, textColor, background: true });
+        continue;
+      }
+
+      if (isSelected) {
+        primaryCandidates.push({ node, priority: 900, force: true, textColor, background: true });
+        continue;
+      }
+
+      if (transform.k >= simConfig.labelZoomThreshold && linkedToSelection) {
+        primaryCandidates.push({ node, priority: 700 + node.links, force: false, textColor, background: true });
+        continue;
+      }
+
+      if (transform.k >= simConfig.labelZoomThreshold && linkedToHover) {
+        primaryCandidates.push({ node, priority: 650 + node.links, force: false, textColor, background: true });
+        continue;
+      }
+
+      if (transform.k >= simConfig.detailZoomThreshold && node.links >= simConfig.idleLabelDegreeThreshold) {
+        backgroundCandidates.push({ node, priority: 400 + node.links, force: false, textColor: mutedTextColor, background: true });
+      }
+    }
+
+    backgroundCandidates.sort((a, b) => b.priority - a.priority);
+    const labelCandidates = [...primaryCandidates, ...backgroundCandidates.slice(0, simConfig.backgroundLabelLimit)]
+      .sort((a, b) => b.priority - a.priority);
+
+    const acceptedRects = [];
+    const padding = 4 / transform.k;
+    const textHeight = 14 / transform.k;
+
+    for (const candidate of labelCandidates) {
+      const textY = candidate.node.y - candidate.node.radius - 12 / transform.k;
+      const textWidth = ctx.measureText(candidate.node.title).width;
+      const labelRect = {
+        x: candidate.node.x - textWidth / 2 - padding,
+        y: textY - textHeight / 2 - padding,
+        w: textWidth + padding * 2,
+        h: textHeight + padding * 2,
+      };
+
+      if (!candidate.force && acceptedRects.some((rect) => rectsOverlap(rect, labelRect))) {
+        continue;
+      }
+
+      acceptedRects.push(labelRect);
+      ctx.fillStyle = isDark ? 'rgba(10, 10, 12, 0.86)' : 'rgba(250, 250, 250, 0.9)';
       ctx.beginPath();
-      ctx.roundRect(
-        node.x - textW / 2 - padding,
-        textY - 7 / transform.k - padding,
-        textW + padding * 2,
-        14 / transform.k + padding * 2,
-        3 / transform.k
-      );
+      ctx.roundRect(labelRect.x, labelRect.y, labelRect.w, labelRect.h, 3 / transform.k);
       ctx.fill();
 
-      ctx.fillStyle = highlighted ? (isDark ? '#f0f0f5' : '#1a1a1e') : textColor;
-      ctx.fillText(node.title, node.x, textY);
+      ctx.fillStyle = candidate.textColor;
+      ctx.fillText(candidate.node.title, candidate.node.x, textY);
     }
 
     ctx.restore();
   }
 
-  // Event handlers
   function getWorldPos(clientX, clientY) {
     const rect = canvas.getBoundingClientRect();
     return {
@@ -418,6 +596,7 @@
       dragNode.vx = 0;
       dragNode.vy = 0;
     } else {
+      dragNode = null;
       isDragging = true;
     }
 
@@ -443,6 +622,10 @@
         dragNode.vx = 0;
         dragNode.vy = 0;
       } else {
+        if (Math.abs(e.clientX - dragStartPos.x) > 2 || Math.abs(e.clientY - dragStartPos.y) > 2) {
+          movedDuringDrag = true;
+          suppressClick = true;
+        }
         transform = { ...transform, x: transform.x + dx, y: transform.y + dy };
       }
     } else {
@@ -452,16 +635,8 @@
     }
   }
 
-  function onMouseUp(e) {
+  function onMouseUp() {
     if (!isDragging) return;
-
-    if (dragNode && !movedDuringDrag) {
-      const dx = e.clientX - dragStartPos.x;
-      const dy = e.clientY - dragStartPos.y;
-      if (Math.abs(dx) < 3 && Math.abs(dy) < 3) {
-        dispatch('navigate', dragNode.id);
-      }
-    }
     clearInteractionState();
   }
 
@@ -470,11 +645,21 @@
       suppressClick = false;
       return;
     }
+
     const pos = getWorldPos(e.clientX, e.clientY);
     const node = findNodeAt(pos.x, pos.y);
-    if (node) {
-      dispatch('navigate', node.id);
+
+    if (!node) {
+      selectedNodeId = null;
+      return;
     }
+
+    if (selectedNodeId === node.id) {
+      dispatch('navigate', node.id);
+      return;
+    }
+
+    selectedNodeId = node.id;
   }
 
   function onWheel(e) {
@@ -495,24 +680,7 @@
   }
 
   function resetView() {
-    if (nodes.length === 0) return;
-    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-    for (const node of nodes) {
-      minX = Math.min(minX, node.x);
-      maxX = Math.max(maxX, node.x);
-      minY = Math.min(minY, node.y);
-      maxY = Math.max(maxY, node.y);
-    }
-    const rect = canvas.getBoundingClientRect();
-    const graphW = maxX - minX + 100;
-    const graphH = maxY - minY + 100;
-    const scale = Math.min(rect.width / graphW, rect.height / graphH, 2);
-    const k = Math.max(0.1, scale * 0.9);
-    transform = {
-      k,
-      x: rect.width / 2 - ((minX + maxX) / 2) * k,
-      y: rect.height / 2 - ((minY + maxY) / 2) * k,
-    };
+    fitGraphToViewport(0.9);
   }
 </script>
 
@@ -540,6 +708,9 @@
         <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
       </button>
       <span class="graph-info">{nodes.length} notes · {links.length} links</span>
+      {#if selectedNodeId}
+        <span class="graph-info emphasis">Click selected note again to open it</span>
+      {/if}
     </div>
   {/if}
 </div>
@@ -591,6 +762,7 @@
     align-items: center;
     gap: 0.75rem;
     z-index: 10;
+    flex-wrap: wrap;
   }
 
   .graph-controls button {
@@ -616,5 +788,9 @@
     font-size: 0.75rem;
     color: var(--color-faint);
     user-select: none;
+  }
+
+  .graph-info.emphasis {
+    color: var(--color-muted);
   }
 </style>
