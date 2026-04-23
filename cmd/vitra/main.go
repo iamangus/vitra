@@ -1,12 +1,13 @@
 package main
 
 import (
+	iofs "io/fs"
 	"log"
 	"net/http"
 	"os"
-	"path/filepath"
 
 	"strings"
+	frontend "vitra/frontend"
 	"vitra/internal"
 )
 
@@ -31,10 +32,11 @@ func main() {
 	http.HandleFunc("GET /api/graph", fs.HandleAPIGraph)
 	http.HandleFunc("POST /api/preview/{path...}", fs.HandleAPIPreview)
 
-	// Serve static files from frontend/dist
-	staticDir := "./frontend/dist"
-	fsys := http.Dir(staticDir)
-	fileServer := http.FileServer(fsys)
+	distFS, err := iofs.Sub(frontend.Dist, "dist")
+	if err != nil {
+		log.Fatalf("failed to load embedded frontend assets: %v", err)
+	}
+	fileServer := http.FileServer(http.FS(distFS))
 
 	// SPA fallback: serve index.html for non-API, non-file routes
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -44,12 +46,15 @@ func main() {
 			return
 		}
 
-		// Check if the file exists in dist
-		path := filepath.Join(staticDir, r.URL.Path)
-		_, err := os.Stat(path)
-		if os.IsNotExist(err) || r.URL.Path == "/" {
+		assetPath := strings.TrimPrefix(strings.TrimPrefix(r.URL.Path, "/"), "./")
+		if assetPath == "" {
+			assetPath = "index.html"
+		}
+
+		info, err := iofs.Stat(distFS, assetPath)
+		if err != nil || info.IsDir() || r.URL.Path == "/" {
 			// Serve index.html for SPA routes
-			http.ServeFile(w, r, filepath.Join(staticDir, "index.html"))
+			http.ServeFileFS(w, r, distFS, "index.html")
 			return
 		}
 		fileServer.ServeHTTP(w, r)
