@@ -69,3 +69,7 @@ export const search = {
 export const backlinks = {
   get: (path) => api(`/backlinks/${encodeURIComponent(path)}`),
 };
+
+export const graph = {
+  get: () => api('/graph'),
+};

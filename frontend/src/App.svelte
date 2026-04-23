@@ -2,6 +2,7 @@
   import Sidebar from './components/Sidebar.svelte';
   import NoteEditor from './components/NoteEditor.svelte';
   import Search from './components/Search.svelte';
+  import GraphView from './components/GraphView.svelte';
   import { theme } from './stores/theme.js';
 
   let currentView = 'home';
@@ -40,6 +41,12 @@
     if (mobile) sidebarOpen = false;
   }
 
+  function navigateToGraph() {
+    currentView = 'graph';
+    window.history.pushState({}, '', '/graph');
+    if (mobile) sidebarOpen = false;
+  }
+
   function handlePopState() {
     const path = window.location.pathname;
     if (path.startsWith('/note/')) {
@@ -49,6 +56,8 @@
       const params = new URLSearchParams(window.location.search);
       searchQuery = params.get('q') || '';
       currentView = 'search';
+    } else if (path === '/graph') {
+      currentView = 'graph';
     } else if (path === '/') {
       currentView = 'home';
       currentPath = '';
@@ -68,6 +77,7 @@
   <Sidebar
     on:navigate={e => navigateToNote(e.detail)}
     on:search={() => navigateToSearch()}
+    on:graph={() => navigateToGraph()}
     on:toggle={() => sidebarOpen = !sidebarOpen}
     activePath={currentPath}
     {sidebarOpen}
@@ -88,6 +98,8 @@
       <NoteEditor path={currentPath} on:navigate={e => navigateToNote(e.detail)} />
     {:else if currentView === 'search'}
       <Search query={searchQuery} on:navigate={e => navigateToNote(e.detail)} />
+    {:else if currentView === 'graph'}
+      <GraphView on:navigate={e => navigateToNote(e.detail)} />
     {/if}
   </main>
 </div>

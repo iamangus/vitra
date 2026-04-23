@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"strings"
 	"vitra/internal"
 )
 
@@ -27,6 +28,7 @@ func main() {
 	http.HandleFunc("DELETE /api/delete", fs.HandleAPIDelete)
 	http.HandleFunc("GET /api/search", fs.HandleAPISearch)
 	http.HandleFunc("GET /api/backlinks/{path...}", fs.HandleAPIBacklinks)
+	http.HandleFunc("GET /api/graph", fs.HandleAPIGraph)
 	http.HandleFunc("POST /api/preview/{path...}", fs.HandleAPIPreview)
 
 	// Serve static files from frontend/dist
@@ -36,6 +38,12 @@ func main() {
 
 	// SPA fallback: serve index.html for non-API, non-file routes
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		// API routes should not fall through to SPA
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			http.NotFound(w, r)
+			return
+		}
+
 		// Check if the file exists in dist
 		path := filepath.Join(staticDir, r.URL.Path)
 		_, err := os.Stat(path)
