@@ -14,6 +14,7 @@
   let nodes = $state([]);
   let links = $state([]);
   let nodeIndexById = new Map();
+  let groupAnchorByKey = new Map();
   let loading = $state(true);
   let error = $state(null);
 
@@ -43,6 +44,12 @@
     backgroundLabelLimit: 12,
     idleLabelDegreeThreshold: 4,
     edgeOpacity: 0.28,
+    collisionStrength: 0.18,
+    hubSpacingScale: 3,
+    groupForce: 0.004,
+    groupOrbitRadius: 280,
+    crossGroupSpringScale: 1.45,
+    crossGroupSpringStrengthScale: 0.72,
   });
 
   let animationId = $state(null);
@@ -119,6 +126,21 @@
     return hash;
   }
 
+  function deriveGroupKey(nodeId) {
+    const parts = nodeId.split('/').filter(Boolean);
+    if (parts.length <= 1) return nodeId;
+
+    if (parts[0] === 'k8s-cluster' && parts[1] === 'Layers' && parts.length >= 3) {
+      return parts.slice(0, 3).join('/');
+    }
+
+    if (parts[0] === 'k8s-cluster') {
+      return parts.slice(0, Math.min(2, parts.length)).join('/');
+    }
+
+    return parts.slice(0, Math.min(2, parts.length)).join('/');
+  }
+
   function resizeCanvas() {
     if (!canvas || !container || !ctx) return;
     const rect = container.getBoundingClientRect();
@@ -155,50 +177,93 @@
 
     return {
       repulsion: 4200 + safeNodeCount * 180 + density * 18000,
-      springLength: 170 + Math.sqrt(safeNodeCount) * 16 + avgDegree * 9,
-      springStrength: clamp(0.1 - density * 0.08, 0.018, 0.09),
+      springLength: 180 + Math.sqrt(safeNodeCount) * 18 + avgDegree * 12,
+      springStrength: clamp(0.09 - density * 0.08, 0.015, 0.08),
       damping: clamp(0.91 - density * 0.05, 0.84, 0.92),
       centerForce: clamp(0.006 - safeNodeCount * 0.00003 - density * 0.002, 0.0012, 0.0045),
       maxSpeed: clamp(3 + Math.sqrt(safeNodeCount) * 0.18, 3, 7),
       preTicks: Math.round(clamp(220 + safeNodeCount * 7 + linkCount * 0.7, 220, 1200)),
-      fitPadding: Math.round(120 + Math.sqrt(safeNodeCount) * 18 + avgDegree * 6),
+      fitPadding: Math.round(135 + Math.sqrt(safeNodeCount) * 20 + avgDegree * 8),
       labelZoomThreshold: safeNodeCount > 60 ? 1.1 : 0.9,
       detailZoomThreshold: safeNodeCount > 60 ? 1.55 : 1.25,
       backgroundLabelLimit: Math.round(clamp(Math.sqrt(safeNodeCount) * 1.5, 8, 20)),
       idleLabelDegreeThreshold: Math.max(4, Math.ceil(avgDegree)),
       edgeOpacity: clamp(0.28 - density * 0.1, 0.1, 0.28),
+      collisionStrength: clamp(0.16 + density * 0.35 + safeNodeCount * 0.0006, 0.16, 0.28),
+      hubSpacingScale: clamp(2.5 + density * 5 + avgDegree * 0.08, 2.5, 5.5),
+      groupForce: clamp(0.003 + density * 0.024 + avgDegree * 0.00018, 0.003, 0.011),
+      groupOrbitRadius: Math.round(290 + Math.sqrt(safeNodeCount) * 38 + avgDegree * 11),
+      crossGroupSpringScale: clamp(1.35 + density * 1.5, 1.35, 1.9),
+      crossGroupSpringStrengthScale: clamp(0.7 - density * 0.3, 0.45, 0.7),
     };
   }
 
-  function seedNodePositions(newNodes, nextConfig) {
-    const orderedNodes = [...newNodes].sort((a, b) => b.links - a.links || a.id.localeCompare(b.id));
-    const baseSpacing = 95 + Math.sqrt(newNodes.length) * 14 + nextConfig.springLength * 0.18;
-    let ring = 0;
-    let indexInRing = 0;
-    let ringCapacity = Math.max(1, Math.round(Math.sqrt(newNodes.length)));
-
-    for (const node of orderedNodes) {
-      if (indexInRing >= ringCapacity) {
-        ring += 1;
-        indexInRing = 0;
-        ringCapacity = Math.max(6, Math.round(Math.sqrt(newNodes.length) * (ring + 1) * 0.9));
+  function buildGroupAnchors(newNodes, nextConfig) {
+    const groups = new Map();
+    for (const node of newNodes) {
+      if (!groups.has(node.groupKey)) {
+        groups.set(node.groupKey, []);
       }
+      groups.get(node.groupKey).push(node);
+    }
 
-      const angle = ringCapacity === 1
-        ? 0
-        : (indexInRing / ringCapacity) * Math.PI * 2 + ring * 0.45;
-      const ringRadius = ring * baseSpacing;
-      const jitterSeed = hashString(node.id);
-      const jitter = Math.min(26, 8 + ring * 2);
-      const jitterX = ((((jitterSeed & 1023) / 1023) * 2) - 1) * jitter;
-      const jitterY = (((((jitterSeed >> 10) & 1023) / 1023) * 2) - 1) * jitter;
+    const orderedGroups = [...groups.entries()].sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]));
+    const anchors = new Map();
 
-      node.x = Math.cos(angle) * ringRadius + jitterX;
-      node.y = Math.sin(angle) * ringRadius + jitterY;
-      node.vx = 0;
-      node.vy = 0;
+    orderedGroups.forEach(([groupKey], index) => {
+      const angle = orderedGroups.length === 1 ? 0 : (index / orderedGroups.length) * Math.PI * 2;
+      const radiusJitter = orderedGroups.length <= 2 ? 0 : (index % 3) * nextConfig.springLength * 0.18;
+      const orbitRadius = orderedGroups.length === 1 ? 0 : nextConfig.groupOrbitRadius + radiusJitter;
+      anchors.set(groupKey, {
+        x: Math.cos(angle) * orbitRadius,
+        y: Math.sin(angle) * orbitRadius,
+      });
+    });
 
-      indexInRing += 1;
+    return anchors;
+  }
+
+  function seedNodePositions(newNodes, nextConfig, anchors) {
+    const groups = new Map();
+    for (const node of newNodes) {
+      if (!groups.has(node.groupKey)) {
+        groups.set(node.groupKey, []);
+      }
+      groups.get(node.groupKey).push(node);
+    }
+
+    const orderedGroups = [...groups.entries()].sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]));
+    for (const [groupKey, groupNodes] of orderedGroups) {
+      const anchor = anchors.get(groupKey) || { x: 0, y: 0 };
+      const orderedNodes = [...groupNodes].sort((a, b) => b.links - a.links || a.id.localeCompare(b.id));
+      const baseSpacing = 42 + Math.sqrt(groupNodes.length) * 13 + nextConfig.springLength * 0.06;
+      let ring = 0;
+      let indexInRing = 0;
+      let ringCapacity = Math.max(1, Math.ceil(Math.sqrt(groupNodes.length) * 1.8));
+
+      for (const node of orderedNodes) {
+        if (indexInRing >= ringCapacity) {
+          ring += 1;
+          indexInRing = 0;
+          ringCapacity = Math.max(6, Math.round(Math.sqrt(groupNodes.length) * (ring + 1) * 1.5));
+        }
+
+        const angle = ringCapacity === 1
+          ? 0
+          : (indexInRing / ringCapacity) * Math.PI * 2 + ring * 0.35 + (hashString(groupKey) % 7) * 0.09;
+        const ringRadius = ring * baseSpacing;
+        const jitterSeed = hashString(node.id);
+        const jitter = Math.min(18, 6 + ring * 2);
+        const jitterX = ((((jitterSeed & 1023) / 1023) * 2) - 1) * jitter;
+        const jitterY = (((((jitterSeed >> 10) & 1023) / 1023) * 2) - 1) * jitter;
+
+        node.x = anchor.x + Math.cos(angle) * ringRadius + jitterX;
+        node.y = anchor.y + Math.sin(angle) * ringRadius + jitterY;
+        node.vx = 0;
+        node.vy = 0;
+
+        indexInRing += 1;
+      }
     }
   }
 
@@ -207,6 +272,7 @@
     const newNodes = data.nodes.map((n) => ({
       id: n.id,
       title: n.title,
+      groupKey: deriveGroupKey(n.id),
       x: 0,
       y: 0,
       vx: 0,
@@ -233,15 +299,19 @@
 
     const maxLinks = Math.max(1, ...newNodes.map((node) => node.links));
     for (const node of newNodes) {
-      node.radius = 3 + (node.links / maxLinks) * 7;
+      const linkRatio = node.links / maxLinks;
+      // Use a steeper curve so hubs read much larger in dense graphs.
+      node.radius = 2.5 + Math.pow(linkRatio, 1.7) * 14;
     }
 
     const nextConfig = buildSimConfig(newNodes.length, newLinks.length);
-    seedNodePositions(newNodes, nextConfig);
+    const nextGroupAnchors = buildGroupAnchors(newNodes, nextConfig);
+    seedNodePositions(newNodes, nextConfig, nextGroupAnchors);
 
     nodes = newNodes;
     links = newLinks;
     nodeIndexById = nextNodeIndexById;
+    groupAnchorByKey = nextGroupAnchors;
     simConfig = nextConfig;
     selectedNodeId = null;
     hoverNode = null;
@@ -321,13 +391,31 @@
         let dx = a.x - b.x;
         let dy = a.y - b.y;
         let dist = Math.sqrt(dx * dx + dy * dy) || 1;
-        const force = (simConfig.repulsion * dt) / (dist * dist);
+        const sameGroup = a.groupKey === b.groupKey;
+        const repulsionMultiplier = sameGroup ? 0.82 : 1.35;
+        const force = (simConfig.repulsion * repulsionMultiplier * dt) / (dist * dist);
         const fx = (dx / dist) * force;
         const fy = (dy / dist) * force;
         a.vx += fx;
         a.vy += fy;
         b.vx -= fx;
         b.vy -= fy;
+
+        const minDistance = a.radius + b.radius + 18
+          + Math.sqrt(a.links) * simConfig.hubSpacingScale
+          + Math.sqrt(b.links) * simConfig.hubSpacingScale
+          + (sameGroup ? 0 : 24);
+        if (dist < minDistance) {
+          // Add a direct separation force so hubs keep enough room for their edges to fan out.
+          const overlap = minDistance - dist;
+          const collisionForce = overlap * simConfig.collisionStrength * dt;
+          const cfx = (dx / dist) * collisionForce;
+          const cfy = (dy / dist) * collisionForce;
+          a.vx += cfx;
+          a.vy += cfy;
+          b.vx -= cfx;
+          b.vy -= cfy;
+        }
       }
     }
 
@@ -335,10 +423,13 @@
       const a = nodes[nodeIndexById.get(link.sourceId)];
       const b = nodes[nodeIndexById.get(link.targetId)];
       if (!a || !b) continue;
+      const sameGroup = a.groupKey === b.groupKey;
       let dx = b.x - a.x;
       let dy = b.y - a.y;
       let dist = Math.sqrt(dx * dx + dy * dy) || 1;
-      const force = (dist - simConfig.springLength) * simConfig.springStrength * dt;
+      const targetLength = simConfig.springLength * (sameGroup ? 1 : simConfig.crossGroupSpringScale);
+      const springStrength = simConfig.springStrength * (sameGroup ? 1 : simConfig.crossGroupSpringStrengthScale);
+      const force = (dist - targetLength) * springStrength * dt;
       const fx = (dx / dist) * force;
       const fy = (dy / dist) * force;
       a.vx += fx;
@@ -348,6 +439,12 @@
     }
 
     for (const node of nodes) {
+      const anchor = groupAnchorByKey.get(node.groupKey);
+      if (anchor) {
+        node.vx += (anchor.x - node.x) * simConfig.groupForce * dt;
+        node.vy += (anchor.y - node.y) * simConfig.groupForce * dt;
+      }
+
       node.vx += (cx - node.x) * simConfig.centerForce * dt;
       node.vy += (cy - node.y) * simConfig.centerForce * dt;
 
@@ -427,6 +524,9 @@
     const defaultLinkColor = isDark
       ? `rgba(139, 139, 152, ${baseLinkAlpha})`
       : `rgba(161, 161, 171, ${baseLinkAlpha})`;
+    const crossGroupLinkColor = isDark
+      ? `rgba(139, 139, 152, ${baseLinkAlpha * 0.55})`
+      : `rgba(161, 161, 171, ${baseLinkAlpha * 0.55})`;
     const dimLinkColor = isDark ? 'rgba(139, 139, 152, 0.05)' : 'rgba(161, 161, 171, 0.08)';
     const nodeColor = isDark ? '#a855f7' : '#7c3aed';
     const hoverColor = isDark ? '#c084fc' : '#6d28d9';
@@ -438,6 +538,7 @@
       const source = nodes[nodeIndexById.get(link.sourceId)];
       const target = nodes[nodeIndexById.get(link.targetId)];
       if (!source || !target) continue;
+      const sameGroup = source.groupKey === target.groupKey;
 
       const touchesSelection = selectedNodeId && (link.sourceId === selectedNodeId || link.targetId === selectedNodeId);
       const touchesHover = hoverNode && (link.sourceId === hoverNode.id || link.targetId === hoverNode.id);
@@ -449,7 +550,7 @@
         ? (isDark ? 'rgba(192, 132, 252, 0.78)' : 'rgba(109, 40, 217, 0.75)')
         : (touchesSelection
           ? (isDark ? 'rgba(168, 85, 247, 0.68)' : 'rgba(124, 58, 237, 0.68)')
-          : (hasSelection ? dimLinkColor : defaultLinkColor));
+          : (hasSelection ? dimLinkColor : (sameGroup ? defaultLinkColor : crossGroupLinkColor)));
       ctx.lineWidth = touchesHover ? 1.8 : (touchesSelection ? 1.5 : 1);
       ctx.stroke();
     }
