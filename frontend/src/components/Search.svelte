@@ -1,6 +1,7 @@
 <script>
-  import { createEventDispatcher } from 'svelte';
+  import { createEventDispatcher, onMount } from 'svelte';
   import { search } from '../lib/api.js';
+  import { subscribeToLiveUpdates } from '../lib/live.js';
 
   const dispatch = createEventDispatcher();
 
@@ -8,6 +9,7 @@
 
   let results = [];
   let loading = false;
+  let liveSearchTimeout;
 
   $: if (query) {
     performSearch();
@@ -35,6 +37,24 @@
     query = formData.get('q');
     window.history.pushState({}, '', `/search?q=${encodeURIComponent(query)}`);
   }
+
+  onMount(() => {
+    const unsubscribe = subscribeToLiveUpdates((event) => {
+      if (!event.search || !query) {
+        return;
+      }
+
+      clearTimeout(liveSearchTimeout);
+      liveSearchTimeout = setTimeout(() => {
+        performSearch();
+      }, 250);
+    });
+
+    return () => {
+      clearTimeout(liveSearchTimeout);
+      unsubscribe();
+    };
+  });
 </script>
 
 <div class="search-page">

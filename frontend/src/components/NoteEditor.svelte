@@ -1,6 +1,7 @@
 <script>
   import { createEventDispatcher, onMount } from 'svelte';
   import { notes, backlinks as backlinksApi } from '../lib/api.js';
+  import { subscribeToLiveUpdates } from '../lib/live.js';
   import Backlinks from './Backlinks.svelte';
 
   const dispatch = createEventDispatcher();
@@ -17,20 +18,31 @@
   let isResizing = false;
   let saveTimeout;
   let previewTimeout;
+  let liveNoteRefreshTimeout;
+  let liveBacklinksRefreshTimeout;
+  let isDirty = false;
+  let suppressLiveReloadUntil = 0;
 
   $: loadNote(path);
 
-  async function loadNote(notePath) {
+  async function loadNote(notePath, options = {}) {
     if (!notePath) return;
+
+    const { preserveMode = false } = options;
+
     try {
       note = await notes.get(notePath);
       content = note.content;
       html = note.html;
-      mode = localStorage.getItem('noteMode') || 'view';
+      if (!preserveMode) {
+        mode = localStorage.getItem('noteMode') || 'view';
+      }
+      isDirty = false;
       await loadBacklinks();
     } catch (e) {
       if (e.message.includes('404')) {
         note = { notFound: true, path: notePath };
+        backlinks = [];
       } else {
         console.error('Failed to load note:', e);
       }
@@ -54,12 +66,19 @@
   }
 
   function handleContentChange() {
+    isDirty = true;
     saveStatus = 'Saving...';
     clearTimeout(saveTimeout);
     saveTimeout = setTimeout(async () => {
+      const contentToSave = content;
       try {
-        await notes.save(path, content);
+        await notes.save(path, contentToSave);
+        suppressLiveReloadUntil = Date.now() + 1500;
+        if (content === contentToSave) {
+          isDirty = false;
+        }
         saveStatus = 'Saved';
+        await loadBacklinks();
         setTimeout(() => saveStatus = '', 2000);
       } catch (e) {
         saveStatus = 'Error';
@@ -130,9 +149,65 @@
     return crumbs;
   }
 
+  function eventTouchesCurrentNote(event) {
+    if (!event?.paths || event.paths.length === 0) {
+      return true;
+    }
+
+    return event.paths.some((changedPath) => changedPath === path
+      || path.startsWith(changedPath + '/')
+      || changedPath.startsWith(path + '/'));
+  }
+
+  function scheduleNoteRefresh() {
+    clearTimeout(liveNoteRefreshTimeout);
+    liveNoteRefreshTimeout = setTimeout(() => {
+      loadNote(path, { preserveMode: true });
+    }, 250);
+  }
+
+  function scheduleBacklinksRefresh() {
+    clearTimeout(liveBacklinksRefreshTimeout);
+    liveBacklinksRefreshTimeout = setTimeout(() => {
+      loadBacklinks();
+    }, 250);
+  }
+
   onMount(() => {
     const savedRatio = localStorage.getItem('splitRatio');
     if (savedRatio) editWidthPercent = parseFloat(savedRatio);
+
+    const unsubscribe = subscribeToLiveUpdates((event) => {
+      if (!path) {
+        return;
+      }
+
+      if (event.graph) {
+        scheduleBacklinksRefresh();
+      }
+
+      if (!(event.notes || event.tree) || !eventTouchesCurrentNote(event)) {
+        return;
+      }
+
+      if (Date.now() < suppressLiveReloadUntil) {
+        return;
+      }
+
+      if (isDirty && !note?.notFound) {
+        return;
+      }
+
+      scheduleNoteRefresh();
+    });
+
+    return () => {
+      clearTimeout(saveTimeout);
+      clearTimeout(previewTimeout);
+      clearTimeout(liveNoteRefreshTimeout);
+      clearTimeout(liveBacklinksRefreshTimeout);
+      unsubscribe();
+    };
   });
 </script>
 

@@ -18,9 +18,14 @@ func main() {
 	}
 
 	fs := internal.NewFileSystem(vaultPath)
+	if err := fs.StartWatcher(); err != nil {
+		log.Fatalf("failed to start vault watcher: %v", err)
+	}
+	defer fs.CloseWatcher()
 
 	// API routes
 	http.HandleFunc("GET /api/files", fs.HandleAPIFileTree)
+	http.HandleFunc("GET /api/events", fs.HandleAPIEvents)
 	http.HandleFunc("GET /api/note/{path...}", fs.HandleAPIViewNote)
 	http.HandleFunc("POST /api/note/{path...}", fs.HandleAPISaveNote)
 	http.HandleFunc("POST /api/notes", fs.HandleAPICreateNote)

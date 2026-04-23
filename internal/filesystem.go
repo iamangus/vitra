@@ -9,10 +9,35 @@ import (
 
 type FileSystem struct {
 	VaultPath string
+	live      *LiveSync
 }
 
 func NewFileSystem(vaultPath string) *FileSystem {
-	return &FileSystem{VaultPath: vaultPath}
+	return &FileSystem{
+		VaultPath: vaultPath,
+		live:      NewLiveSync(),
+	}
+}
+
+func (fs *FileSystem) StartWatcher() error {
+	if fs.live == nil {
+		return nil
+	}
+	return fs.live.Start(fs.VaultPath)
+}
+
+func (fs *FileSystem) CloseWatcher() error {
+	if fs.live == nil {
+		return nil
+	}
+	return fs.live.Close()
+}
+
+func (fs *FileSystem) NotifyVaultChange(paths []string, tree bool, graph bool, search bool, notes bool) {
+	if fs.live == nil {
+		return
+	}
+	fs.live.Notify(paths, tree, graph, search, notes)
 }
 
 type FileNode struct {

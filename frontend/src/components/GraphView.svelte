@@ -1,6 +1,7 @@
 <script>
-  import { createEventDispatcher } from 'svelte';
+  import { createEventDispatcher, onMount } from 'svelte';
   import { graph } from '../lib/api.js';
+  import { subscribeToLiveUpdates } from '../lib/live.js';
 
   const dispatch = createEventDispatcher();
 
@@ -25,6 +26,7 @@
   let hoverNode = $state(null);
   let selectedNodeId = $state(null);
   let mousePos = $state({ x: 0, y: 0 });
+  let dragWorldPos = $state({ x: 0, y: 0 });
   let dragStartPos = $state({ x: 0, y: 0 });
   let movedDuringDrag = $state(false);
   let suppressClick = $state(false);
@@ -55,6 +57,7 @@
   let animationId = $state(null);
   let resizeObserver = $state(null);
   let simRunning = $state(false);
+  let graphReloadTimeout;
 
   $effect(() => {
     dpr = window.devicePixelRatio || 1;
@@ -112,6 +115,24 @@
       simRunning = true;
       startSimulation();
     }
+  });
+
+  onMount(() => {
+    const unsubscribe = subscribeToLiveUpdates((event) => {
+      if (!event.graph) {
+        return;
+      }
+
+      clearTimeout(graphReloadTimeout);
+      graphReloadTimeout = setTimeout(() => {
+        loadGraph();
+      }, 250);
+    });
+
+    return () => {
+      clearTimeout(graphReloadTimeout);
+      unsubscribe();
+    };
   });
 
   function clamp(value, min, max) {
@@ -267,18 +288,62 @@
     }
   }
 
+  function positionNewNodes(newNodes, anchors) {
+    const existingNodesByGroup = new Map();
+
+    for (const node of newNodes) {
+      if (node.isNew) continue;
+      if (!existingNodesByGroup.has(node.groupKey)) {
+        existingNodesByGroup.set(node.groupKey, []);
+      }
+      existingNodesByGroup.get(node.groupKey).push(node);
+    }
+
+    for (const node of newNodes) {
+      if (!node.isNew) continue;
+
+      const neighbors = existingNodesByGroup.get(node.groupKey) || [];
+      const seed = hashString(node.id);
+      const angle = ((seed % 360) / 360) * Math.PI * 2;
+      const offset = 44 + (seed % 36);
+
+      if (neighbors.length > 0) {
+        const centroid = neighbors.reduce((acc, neighbor) => {
+          acc.x += neighbor.x;
+          acc.y += neighbor.y;
+          return acc;
+        }, { x: 0, y: 0 });
+
+        node.x = centroid.x / neighbors.length + Math.cos(angle) * offset;
+        node.y = centroid.y / neighbors.length + Math.sin(angle) * offset;
+      } else {
+        const anchor = anchors.get(node.groupKey) || { x: 0, y: 0 };
+        node.x = anchor.x + Math.cos(angle) * offset;
+        node.y = anchor.y + Math.sin(angle) * offset;
+      }
+
+      node.vx = 0;
+      node.vy = 0;
+    }
+  }
+
   function initGraph(data) {
+    const existingNodesById = new Map(nodes.map((node) => [node.id, node]));
+    const hadLayout = existingNodesById.size > 0;
+    const previousSelectedNodeId = selectedNodeId;
+    const previousHoverNodeId = hoverNode?.id || null;
     const nextNodeIndexById = new Map();
     const newNodes = data.nodes.map((n) => ({
       id: n.id,
       title: n.title,
       groupKey: deriveGroupKey(n.id),
-      x: 0,
-      y: 0,
-      vx: 0,
-      vy: 0,
+      x: existingNodesById.get(n.id)?.x ?? 0,
+      y: existingNodesById.get(n.id)?.y ?? 0,
+      vx: existingNodesById.get(n.id)?.vx ?? 0,
+      vy: existingNodesById.get(n.id)?.vy ?? 0,
       radius: 4,
       links: 0,
+      isNew: !existingNodesById.has(n.id),
     }));
 
     for (const node of newNodes) {
@@ -301,20 +366,34 @@
     for (const node of newNodes) {
       const linkRatio = node.links / maxLinks;
       // Use a steeper curve so hubs read much larger in dense graphs.
-      node.radius = 2.5 + Math.pow(linkRatio, 1.7) * 14;
+      node.radius = 16 + Math.pow(linkRatio, 1.7) * 13;
     }
 
     const nextConfig = buildSimConfig(newNodes.length, newLinks.length);
     const nextGroupAnchors = buildGroupAnchors(newNodes, nextConfig);
-    seedNodePositions(newNodes, nextConfig, nextGroupAnchors);
+    if (hadLayout) {
+      positionNewNodes(newNodes, nextGroupAnchors);
+    } else {
+      seedNodePositions(newNodes, nextConfig, nextGroupAnchors);
+    }
 
     nodes = newNodes;
     links = newLinks;
     nodeIndexById = nextNodeIndexById;
     groupAnchorByKey = nextGroupAnchors;
     simConfig = nextConfig;
-    selectedNodeId = null;
-    hoverNode = null;
+
+    if (previousSelectedNodeId && nextNodeIndexById.has(previousSelectedNodeId)) {
+      selectedNodeId = previousSelectedNodeId;
+    } else {
+      selectedNodeId = null;
+    }
+
+    if (previousHoverNodeId && nextNodeIndexById.has(previousHoverNodeId)) {
+      hoverNode = newNodes[nextNodeIndexById.get(previousHoverNodeId)];
+    } else {
+      hoverNode = null;
+    }
   }
 
   function startSimulation() {
@@ -330,7 +409,7 @@
       const dt = Math.min((now - lastTime) / 16.67, 3);
       lastTime = now;
 
-      if (!isDragging && nodes.length > 0) {
+      if (nodes.length > 0) {
         simulate(dt);
       }
       render();
@@ -439,6 +518,14 @@
     }
 
     for (const node of nodes) {
+      if (dragNode && node.id === dragNode.id) {
+        node.x = dragWorldPos.x;
+        node.y = dragWorldPos.y;
+        node.vx = 0;
+        node.vy = 0;
+        continue;
+      }
+
       const anchor = groupAnchorByKey.get(node.groupKey);
       if (anchor) {
         node.vx += (anchor.x - node.x) * simConfig.groupForce * dt;
@@ -475,6 +562,24 @@
       }
     }
     return connectedIds;
+  }
+
+  function getConnectedNodes(focusId) {
+    if (!focusId) return [];
+
+    const connectedIds = getConnectedIds(focusId);
+    connectedIds.delete(focusId);
+
+    return [...connectedIds]
+      .map((id) => nodes[nodeIndexById.get(id)])
+      .filter(Boolean)
+      .sort((a, b) => b.links - a.links || a.title.localeCompare(b.title));
+  }
+
+  function getFocusedDetailNode() {
+    if (hoverNode) return hoverNode;
+    if (!selectedNodeId) return null;
+    return nodes[nodeIndexById.get(selectedNodeId)] || null;
   }
 
   function getVisibleWorldRect(width, height) {
@@ -610,8 +715,8 @@
         continue;
       }
 
-      if (transform.k >= simConfig.labelZoomThreshold && linkedToHover) {
-        primaryCandidates.push({ node, priority: 650 + node.links, force: false, textColor, background: true });
+      if (linkedToHover) {
+        primaryCandidates.push({ node, priority: 800 + node.links, force: true, textColor, background: true });
         continue;
       }
 
@@ -678,6 +783,7 @@
 
   function clearInteractionState() {
     dragNode = null;
+    dragWorldPos = { x: 0, y: 0 };
     isDragging = false;
     hoverNode = null;
     movedDuringDrag = false;
@@ -694,10 +800,12 @@
     if (node) {
       dragNode = node;
       isDragging = true;
+      dragWorldPos = { x: node.x, y: node.y };
       dragNode.vx = 0;
       dragNode.vy = 0;
     } else {
       dragNode = null;
+      dragWorldPos = { x: 0, y: 0 };
       isDragging = true;
     }
 
@@ -718,8 +826,12 @@
           movedDuringDrag = true;
           suppressClick = true;
         }
-        dragNode.x += dx / transform.k;
-        dragNode.y += dy / transform.k;
+        dragWorldPos = {
+          x: dragWorldPos.x + dx / transform.k,
+          y: dragWorldPos.y + dy / transform.k,
+        };
+        dragNode.x = dragWorldPos.x;
+        dragNode.y = dragWorldPos.y;
         dragNode.vx = 0;
         dragNode.vy = 0;
       } else {
@@ -813,6 +925,18 @@
         <span class="graph-info emphasis">Click selected note again to open it</span>
       {/if}
     </div>
+    {@const detailNode = getFocusedDetailNode()}
+    {#if detailNode}
+      <div class="hover-details">
+        <div class="hover-details-title">{detailNode.title}</div>
+        <div class="hover-details-subtitle">{getConnectedNodes(detailNode.id).length} connected notes</div>
+        <div class="hover-details-list">
+          {#each getConnectedNodes(detailNode.id) as node (node.id)}
+            <div class="hover-details-item">{node.title}</div>
+          {/each}
+        </div>
+      </div>
+    {/if}
   {/if}
 </div>
 
@@ -893,5 +1017,64 @@
 
   .graph-info.emphasis {
     color: var(--color-muted);
+  }
+
+  .hover-details {
+    position: absolute;
+    top: 1rem;
+    right: 1rem;
+    width: min(22rem, calc(100% - 2rem));
+    max-height: min(60%, 32rem);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    padding: 0.9rem;
+    border-radius: var(--radius-md);
+    background: color-mix(in srgb, var(--bg-elevated) 94%, transparent);
+    border: 1px solid var(--border-color);
+    box-shadow: var(--shadow-md);
+    z-index: 10;
+    backdrop-filter: blur(10px);
+  }
+
+  .hover-details-title {
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: var(--color);
+    line-height: 1.3;
+  }
+
+  .hover-details-subtitle {
+    font-size: 0.75rem;
+    color: var(--color-muted);
+  }
+
+  .hover-details-list {
+    overflow: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    padding-right: 0.25rem;
+  }
+
+  .hover-details-item {
+    font-size: 0.8rem;
+    color: var(--color);
+    line-height: 1.35;
+    padding: 0.35rem 0.45rem;
+    border-radius: var(--radius-sm);
+    background: color-mix(in srgb, var(--hover-bg) 80%, transparent);
+  }
+
+  @media (max-width: 768px) {
+    .hover-details {
+      top: auto;
+      right: 0.75rem;
+      bottom: 4rem;
+      left: 0.75rem;
+      width: auto;
+      max-height: 40%;
+    }
   }
 </style>

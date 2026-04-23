@@ -76,6 +76,8 @@ func (fs *FileSystem) HandleAPISaveNote(w http.ResponseWriter, r *http.Request) 
 	defer r.Body.Close()
 
 	fullPath := filepath.Join(fs.VaultPath, path+".md")
+	_, statErr := os.Stat(fullPath)
+	isNewNote := os.IsNotExist(statErr)
 	dir := filepath.Dir(fullPath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -86,6 +88,8 @@ func (fs *FileSystem) HandleAPISaveNote(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	fs.NotifyVaultChange([]string{path}, isNewNote, true, true, true)
 
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("Saved"))
@@ -123,6 +127,8 @@ func (fs *FileSystem) HandleAPICreateNote(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	fs.NotifyVaultChange([]string{req.Path}, true, true, true, true)
+
 	w.WriteHeader(http.StatusCreated)
 }
 
@@ -145,6 +151,8 @@ func (fs *FileSystem) HandleAPICreateFolder(w http.ResponseWriter, r *http.Reque
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	fs.NotifyVaultChange([]string{req.Path}, true, false, false, false)
 
 	w.WriteHeader(http.StatusCreated)
 }
@@ -172,6 +180,8 @@ func (fs *FileSystem) HandleAPIRename(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	fs.NotifyVaultChange([]string{req.Old, req.New}, true, true, true, true)
+
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -187,6 +197,8 @@ func (fs *FileSystem) HandleAPIDelete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	fs.NotifyVaultChange([]string{path}, true, true, true, true)
 
 	w.WriteHeader(http.StatusOK)
 }

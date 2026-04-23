@@ -1,6 +1,7 @@
 <script>
-  import { createEventDispatcher } from 'svelte';
+  import { createEventDispatcher, onMount } from 'svelte';
   import { files, folders, fileOps } from '../lib/api.js';
+  import { subscribeToLiveUpdates } from '../lib/live.js';
   import FileTree from './FileTree.svelte';
   import { theme } from '../stores/theme.js';
 
@@ -16,6 +17,7 @@
   let contextMenu = { show: false, x: 0, y: 0, path: '', isDir: false };
   let sidebarWidth = 280;
   let isResizing = false;
+  let liveTreeReloadTimeout;
 
   async function loadTree() {
     try {
@@ -25,7 +27,12 @@
     }
   }
 
-  loadTree();
+  function scheduleTreeReload() {
+    clearTimeout(liveTreeReloadTimeout);
+    liveTreeReloadTimeout = setTimeout(() => {
+      loadTree();
+    }, 250);
+  }
 
   function startResize(e) {
     isResizing = true;
@@ -123,6 +130,22 @@
   }
 
   $: isCollapsed = !sidebarOpen;
+
+  onMount(() => {
+    loadTree();
+
+    const unsubscribe = subscribeToLiveUpdates((event) => {
+      if (event.tree) {
+        scheduleTreeReload();
+      }
+    });
+
+    return () => {
+      clearTimeout(liveTreeReloadTimeout);
+      unsubscribe();
+      stopResize();
+    };
+  });
 </script>
 
 <!-- Floating toggle button when sidebar is collapsed (desktop only) -->
