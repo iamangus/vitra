@@ -285,7 +285,7 @@ func (fs *FileSystem) HandleAPIGraph(w http.ResponseWriter, r *http.Request) {
 	}
 
 	nodes := make(map[string]GraphNode)
-	var links []GraphLink
+	links := make([]GraphLink, 0)
 
 	wikiLinkRegex := regexp.MustCompile(`\[\[([^\]|]+)(?:\|[^\]]+)?\]\]`)
 
