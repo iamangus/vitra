@@ -39,6 +39,8 @@
   let simConfig = null;
   let simRunning = false;
   let dpr = 1;
+  let remainingPreTicks = 0;
+  let hasFitted = false;
 
   onMount(() => {
     dpr = window.devicePixelRatio || 1;
@@ -377,16 +379,13 @@
 
     // Start or restart simulation
     if (animationId) cancelAnimationFrame(animationId);
+    hasFitted = false;
     simRunning = true;
     startSimulation();
   }
 
   function startSimulation() {
-    for (let i = 0; i < simConfig.preTicks; i++) {
-      simulate(1);
-    }
-
-    fitGraphToViewport(0.86);
+    remainingPreTicks = simConfig.preTicks;
 
     let lastTime = performance.now();
 
@@ -395,6 +394,18 @@
       lastTime = now;
 
       if (nodes.length > 0) {
+        // Batch warm-up ticks per frame (time-budgeted)
+        const batchStart = performance.now();
+        while (remainingPreTicks > 0 && performance.now() - batchStart < 10) {
+          simulate(1);
+          remainingPreTicks--;
+        }
+
+        if (remainingPreTicks <= 0 && !hasFitted) {
+          fitGraphToViewport(0.86);
+          hasFitted = true;
+        }
+
         simulate(dt);
       }
       render();
