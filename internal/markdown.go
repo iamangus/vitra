@@ -97,13 +97,30 @@ func preprocessObsidianSyntax(content []byte, vaultPath string) []byte {
 }
 
 func findNotePath(title string, vaultPath string) string {
-	// Try exact match first
+	// Strip .md extension if present
+	title = strings.TrimSuffix(title, ".md")
+
+	// If title contains a path separator, try exact path match first
+	if strings.Contains(title, "/") || strings.Contains(title, string(filepath.Separator)) {
+		candidate := filepath.Join(vaultPath, title+".md")
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			rel, _ := filepath.Rel(vaultPath, candidate)
+			return filepath.ToSlash(strings.TrimSuffix(rel, ".md"))
+		}
+		// Try case-insensitive path match by walking parent directories
+		parts := strings.Split(filepath.ToSlash(title), "/")
+		if found := findCaseInsensitivePath(vaultPath, parts); found != "" {
+			return found
+		}
+	}
+
+	// Fallback: match by filename only across the entire vault
 	var found string
 	filepath.Walk(vaultPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
 			return nil
 		}
-		if strings.EqualFold(strings.TrimSuffix(info.Name(), ".md"), title) {
+		if strings.EqualFold(strings.TrimSuffix(info.Name(), ".md"), filepath.Base(title)) {
 			rel, _ := filepath.Rel(vaultPath, path)
 			found = filepath.ToSlash(strings.TrimSuffix(rel, ".md"))
 			return filepath.SkipAll
@@ -111,6 +128,48 @@ func findNotePath(title string, vaultPath string) string {
 		return nil
 	})
 	return found
+}
+
+// findCaseInsensitivePath walks the vault trying to match each path segment case-insensitively.
+func findCaseInsensitivePath(vaultPath string, parts []string) string {
+	currentPath := vaultPath
+	for i, part := range parts {
+		entries, err := os.ReadDir(currentPath)
+		if err != nil {
+			return ""
+		}
+		var matched bool
+		for _, entry := range entries {
+			if strings.EqualFold(entry.Name(), part) {
+				currentPath = filepath.Join(currentPath, entry.Name())
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return ""
+		}
+		// Last part must be a file (with .md extension)
+		if i == len(parts)-1 {
+			info, err := os.Stat(currentPath + ".md")
+			if err == nil && !info.IsDir() {
+				rel, _ := filepath.Rel(vaultPath, currentPath+".md")
+				return filepath.ToSlash(strings.TrimSuffix(rel, ".md"))
+			}
+			// Also check if it's already a file without adding .md
+			info, err = os.Stat(currentPath)
+			if err == nil && !info.IsDir() {
+				rel, _ := filepath.Rel(vaultPath, currentPath)
+				return filepath.ToSlash(strings.TrimSuffix(rel, ".md"))
+			}
+			return ""
+		}
+		// Intermediate parts must be directories
+		if info, err := os.Stat(currentPath); err != nil || !info.IsDir() {
+			return ""
+		}
+	}
+	return ""
 }
 
 // Extract frontmatter and body from markdown content
