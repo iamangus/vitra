@@ -58,6 +58,7 @@
   let resizeObserver = $state(null);
   let simRunning = $state(false);
   let graphReloadTimeout;
+  let showAllLabels = $state(false);
 
   $effect(() => {
     dpr = window.devicePixelRatio || 1;
@@ -118,6 +119,8 @@
   });
 
   onMount(() => {
+    showAllLabels = localStorage.getItem('graphShowAllLabels') === 'true';
+
     const unsubscribe = subscribeToLiveUpdates((event) => {
       if (!event.graph) {
         return;
@@ -134,6 +137,11 @@
       unsubscribe();
     };
   });
+
+  function toggleAllLabels() {
+    showAllLabels = !showAllLabels;
+    localStorage.setItem('graphShowAllLabels', showAllLabels ? 'true' : 'false');
+  }
 
   function clamp(value, min, max) {
     return Math.max(min, Math.min(max, value));
@@ -700,6 +708,26 @@
       const linkedToSelection = selectedConnectedIds.has(node.id) && !isSelected;
       const linkedToHover = hoverConnectedIds.has(node.id) && !isHover;
 
+      if (showAllLabels) {
+        const priority = isHover
+          ? 1000
+          : isSelected
+            ? 900
+            : linkedToHover
+              ? 800
+              : linkedToSelection
+                ? 700
+                : 500;
+        primaryCandidates.push({
+          node,
+          priority: priority + node.links,
+          force: true,
+          textColor: isHover || isSelected || linkedToHover || linkedToSelection ? textColor : mutedTextColor,
+          background: true,
+        });
+        continue;
+      }
+
       if (isHover) {
         primaryCandidates.push({ node, priority: 1000, force: true, textColor, background: true });
         continue;
@@ -743,7 +771,7 @@
         h: textHeight + padding * 2,
       };
 
-      if (!candidate.force && acceptedRects.some((rect) => rectsOverlap(rect, labelRect))) {
+      if (!showAllLabels && !candidate.force && acceptedRects.some((rect) => rectsOverlap(rect, labelRect))) {
         continue;
       }
 
@@ -920,6 +948,23 @@
       <button onclick={resetView} title="Fit to view">
         <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
       </button>
+      <button
+        class="icon-toggle"
+        class:active={showAllLabels}
+        onclick={toggleAllLabels}
+        title="Toggle always-visible node labels"
+        aria-label="Toggle always-visible node labels"
+        aria-pressed={showAllLabels}
+      >
+        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="5" cy="6" r="1.5"/>
+          <circle cx="5" cy="12" r="1.5"/>
+          <circle cx="5" cy="18" r="1.5"/>
+          <path d="M9 6h10"/>
+          <path d="M9 12h10"/>
+          <path d="M9 18h10"/>
+        </svg>
+      </button>
       <span class="graph-info">{nodes.length} notes · {links.length} links</span>
       {#if selectedNodeId}
         <span class="graph-info emphasis">Click selected note again to open it</span>
@@ -1007,6 +1052,22 @@
   .graph-controls button:hover {
     background: var(--hover-bg);
     color: var(--color);
+  }
+
+  .graph-controls button.active {
+    background: var(--primary-soft);
+    color: var(--primary);
+    border-color: color-mix(in srgb, var(--primary) 35%, var(--border-color));
+  }
+
+  .graph-controls button.icon-toggle {
+    width: 2rem;
+    height: 2rem;
+    padding: 0;
+  }
+
+  .graph-controls button.icon-toggle svg {
+    display: block;
   }
 
   .graph-info {
