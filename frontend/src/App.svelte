@@ -42,6 +42,7 @@
   }
 
   function navigateToGraph() {
+    currentPath = '';
     currentView = 'graph';
     window.history.pushState({}, '', '/graph');
     if (mobile) sidebarOpen = false;
@@ -57,6 +58,7 @@
       searchQuery = params.get('q') || '';
       currentView = 'search';
     } else if (path === '/graph') {
+      currentPath = '';
       currentView = 'graph';
     } else if (path === '/') {
       currentView = 'home';

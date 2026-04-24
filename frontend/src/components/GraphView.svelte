@@ -8,14 +8,10 @@
   // Canvas refs
   let canvas = $state(null);
   let container = $state(null);
-  let ctx = $state(null);
-  let dpr = $state(1);
 
   // Graph data
   let nodes = $state([]);
   let links = $state([]);
-  let nodeIndexById = new Map();
-  let groupAnchorByKey = new Map();
   let loading = $state(true);
   let error = $state(null);
 
@@ -31,101 +27,27 @@
   let movedDuringDrag = $state(false);
   let suppressClick = $state(false);
 
-  // Adaptive simulation config
-  let simConfig = $state({
-    repulsion: 5000,
-    springLength: 250,
-    springStrength: 0.15,
-    damping: 0.92,
-    centerForce: 0.01,
-    maxSpeed: 4,
-    preTicks: 300,
-    fitPadding: 120,
-    labelZoomThreshold: 0.95,
-    detailZoomThreshold: 1.45,
-    backgroundLabelLimit: 12,
-    idleLabelDegreeThreshold: 4,
-    edgeOpacity: 0.28,
-    collisionStrength: 0.18,
-    hubSpacingScale: 3,
-    groupForce: 0.004,
-    groupOrbitRadius: 280,
-    crossGroupSpringScale: 1.45,
-    crossGroupSpringStrengthScale: 0.72,
-  });
-
-  let animationId = $state(null);
-  let resizeObserver = $state(null);
-  let simRunning = $state(false);
-  let graphReloadTimeout;
   let showAllLabels = $state(false);
 
-  $effect(() => {
-    dpr = window.devicePixelRatio || 1;
-    loadGraph();
-
-    return () => {
-      if (animationId) cancelAnimationFrame(animationId);
-      if (resizeObserver) resizeObserver.disconnect();
-    };
-  });
-
-  $effect(() => {
-    if (!canvas || !container) return;
-
-    ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    resizeCanvas();
-
-    resizeObserver = new ResizeObserver(() => {
-      resizeCanvas();
-      if (nodes.length > 0) {
-        fitGraphToViewport(0.86);
-      }
-    });
-    resizeObserver.observe(container);
-
-    return () => {
-      if (resizeObserver) resizeObserver.disconnect();
-    };
-  });
-
-  $effect(() => {
-    if (!canvas) return;
-
-    const handleWindowMouseMove = (e) => {
-      onMouseMove(e);
-    };
-
-    const handleWindowMouseUp = (e) => {
-      onMouseUp(e);
-    };
-
-    window.addEventListener('mousemove', handleWindowMouseMove);
-    window.addEventListener('mouseup', handleWindowMouseUp);
-
-    return () => {
-      window.removeEventListener('mousemove', handleWindowMouseMove);
-      window.removeEventListener('mouseup', handleWindowMouseUp);
-    };
-  });
-
-  $effect(() => {
-    if (nodes.length > 0 && ctx && !simRunning && canvas) {
-      simRunning = true;
-      startSimulation();
-    }
-  });
+  // Imperative handles (not reactive UI state)
+  let ctx = null;
+  let animationId = null;
+  let resizeObserver = null;
+  let graphReloadTimeout = null;
+  let nodeIndexById = new Map();
+  let groupAnchorByKey = new Map();
+  let simConfig = null;
+  let simRunning = false;
+  let dpr = 1;
 
   onMount(() => {
+    dpr = window.devicePixelRatio || 1;
     showAllLabels = localStorage.getItem('graphShowAllLabels') === 'true';
 
-    const unsubscribe = subscribeToLiveUpdates((event) => {
-      if (!event.graph) {
-        return;
-      }
+    loadGraph();
 
+    const unsubscribe = subscribeToLiveUpdates((event) => {
+      if (!event.graph) return;
       clearTimeout(graphReloadTimeout);
       graphReloadTimeout = setTimeout(() => {
         loadGraph();
@@ -134,7 +56,52 @@
 
     return () => {
       clearTimeout(graphReloadTimeout);
+      if (animationId) cancelAnimationFrame(animationId);
+      if (resizeObserver) resizeObserver.disconnect();
       unsubscribe();
+    };
+  });
+
+  // Canvas + ResizeObserver setup (reactive to container/canvas binding)
+  $effect(() => {
+    if (!canvas || !container) return;
+
+    ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    resizeCanvas();
+
+    if (!resizeObserver) {
+      resizeObserver = new ResizeObserver(() => {
+        resizeCanvas();
+        if (nodes.length > 0) {
+          fitGraphToViewport(0.86);
+        }
+      });
+      resizeObserver.observe(container);
+    }
+
+    return () => {
+      if (resizeObserver) {
+        resizeObserver.disconnect();
+        resizeObserver = null;
+      }
+    };
+  });
+
+  // Window-level mouse events
+  $effect(() => {
+    if (!canvas) return;
+
+    const handleWindowMouseMove = (e) => onMouseMove(e);
+    const handleWindowMouseUp = () => onMouseUp();
+
+    window.addEventListener('mousemove', handleWindowMouseMove);
+    window.addEventListener('mouseup', handleWindowMouseUp);
+
+    return () => {
+      window.removeEventListener('mousemove', handleWindowMouseMove);
+      window.removeEventListener('mouseup', handleWindowMouseUp);
     };
   });
 
@@ -379,7 +346,6 @@
     const maxLinks = Math.max(1, ...newNodes.map((node) => node.links));
     for (const node of newNodes) {
       const linkRatio = node.links / maxLinks;
-      // Use a steeper curve so hubs read much larger in dense graphs.
       node.radius = 16 + Math.pow(linkRatio, 1.7) * 13;
     }
 
@@ -408,6 +374,11 @@
     } else {
       hoverNode = null;
     }
+
+    // Start or restart simulation
+    if (animationId) cancelAnimationFrame(animationId);
+    simRunning = true;
+    startSimulation();
   }
 
   function startSimulation() {
@@ -499,7 +470,6 @@
           + Math.sqrt(b.links) * simConfig.hubSpacingScale
           + (sameGroup ? 0 : 24);
         if (dist < minDistance) {
-          // Add a direct separation force so hubs keep enough room for their edges to fan out.
           const overlap = minDistance - dist;
           const collisionForce = overlap * simConfig.collisionStrength * dt;
           const cfx = (dx / dist) * collisionForce;
@@ -964,9 +934,9 @@
         aria-pressed={showAllLabels}
       >
         <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <circle cx="5" cy="6" r="1.5"/>
-          <circle cx="5" cy="12" r="1.5"/>
-          <circle cx="5" cy="18" r="1.5"/>
+          <circle cx="5" cy="6" r="1.5" fill="currentColor"/>
+          <circle cx="5" cy="12" r="1.5" fill="currentColor"/>
+          <circle cx="5" cy="18" r="1.5" fill="currentColor"/>
           <path d="M9 6h10"/>
           <path d="M9 12h10"/>
           <path d="M9 18h10"/>
@@ -1087,6 +1057,7 @@
   .graph-controls button.icon-toggle svg {
     display: block;
     stroke: currentColor;
+    color: inherit;
   }
 
   .graph-controls button.icon-toggle:hover {
@@ -1094,7 +1065,9 @@
   }
 
   .graph-controls button.icon-toggle.active {
+    background: var(--primary-soft);
     color: var(--primary);
+    border-color: color-mix(in srgb, var(--primary) 35%, var(--border-color));
   }
 
   .graph-info {

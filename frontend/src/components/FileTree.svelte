@@ -14,7 +14,7 @@
   }
 </script>
 
-{#each nodes as node}
+{#each nodes as node (node.Path)}
   <div class="file-tree-item">
     {#if node.IsDir}
       <details class="group" open={node.IsOpen}>
