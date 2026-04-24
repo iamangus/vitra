@@ -135,7 +135,7 @@
     loadTree();
 
     const unsubscribe = subscribeToLiveUpdates((event) => {
-      if (event.tree) {
+      if (event.tree || event.notes) {
         scheduleTreeReload();
       }
     });

@@ -185,12 +185,18 @@
   }
 
   async function loadGraph() {
+    error = null;
+
     try {
       const data = await graph.get();
       if (!data || !Array.isArray(data.nodes)) {
         throw new Error('Invalid graph data');
       }
-      initGraph(data);
+
+      initGraph({
+        nodes: data.nodes,
+        links: Array.isArray(data.links) ? data.links : [],
+      });
     } catch (e) {
       error = e.message;
     } finally {
@@ -930,8 +936,6 @@
     <div class="loading">Loading graph...</div>
   {:else if error}
     <div class="error">{error}</div>
-  {:else if nodes.length === 0}
-    <div class="empty">No notes found. Create some notes with [[WikiLinks]] to see the graph.</div>
   {:else}
     <canvas
       bind:this={canvas}
@@ -944,8 +948,11 @@
       }}
       onwheel={onWheel}
     ></canvas>
+    {#if nodes.length === 0}
+      <div class="empty graph-overlay">No notes found. Create some notes with [[WikiLinks]] to see the graph.</div>
+    {/if}
     <div class="graph-controls">
-      <button onclick={resetView} title="Fit to view">
+      <button onclick={resetView} title="Fit to view" disabled={nodes.length === 0}>
         <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
       </button>
       <button
@@ -1054,6 +1061,16 @@
     color: var(--color);
   }
 
+  .graph-controls button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .graph-controls button:disabled:hover {
+    background: var(--bg-elevated);
+    color: var(--color-muted);
+  }
+
   .graph-controls button.active {
     background: var(--primary-soft);
     color: var(--primary);
@@ -1064,10 +1081,20 @@
     width: 2rem;
     height: 2rem;
     padding: 0;
+    color: var(--color-faint);
   }
 
   .graph-controls button.icon-toggle svg {
     display: block;
+    stroke: currentColor;
+  }
+
+  .graph-controls button.icon-toggle:hover {
+    color: var(--color);
+  }
+
+  .graph-controls button.icon-toggle.active {
+    color: var(--primary);
   }
 
   .graph-info {
@@ -1078,6 +1105,14 @@
 
   .graph-info.emphasis {
     color: var(--color-muted);
+  }
+
+  .graph-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 5;
+    background: color-mix(in srgb, var(--bg) 82%, transparent);
+    pointer-events: none;
   }
 
   .hover-details {
