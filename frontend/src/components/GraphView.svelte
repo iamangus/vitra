@@ -41,6 +41,8 @@
   let dpr = 1;
   let remainingPreTicks = 0;
   let hasFitted = false;
+  let simulationAlpha = 1;
+  let settledFrameCount = 0;
 
   onMount(() => {
     dpr = window.devicePixelRatio || 1;
@@ -114,6 +116,60 @@
 
   function clamp(value, min, max) {
     return Math.max(min, Math.min(max, value));
+  }
+
+  function getSettleSpeedThreshold() {
+    return Math.max(0.035, 0.14 - Math.sqrt(nodes.length || 1) * 0.01);
+  }
+
+  function startSimulationLoop() {
+    if (simRunning) return;
+    simRunning = true;
+
+    let lastTime = performance.now();
+
+    function tick(now) {
+      const dt = Math.min((now - lastTime) / 16.67, 3);
+      lastTime = now;
+
+      if (nodes.length > 0) {
+        const batchStart = performance.now();
+        while (remainingPreTicks > 0 && performance.now() - batchStart < 10) {
+          simulate(1);
+          remainingPreTicks--;
+        }
+
+        if (remainingPreTicks <= 0 && !hasFitted) {
+          fitGraphToViewport(0.86);
+          hasFitted = true;
+        }
+
+        const maxNodeSpeed = simulate(dt);
+        const minAlpha = dragNode ? 0.28 : 0.12;
+        const decay = remainingPreTicks > 0 ? 0.994 : (dragNode ? 0.992 : 0.972);
+        simulationAlpha = Math.max(minAlpha, simulationAlpha * decay);
+
+        if (dragNode) {
+          settledFrameCount = 0;
+        } else if (remainingPreTicks <= 0 && maxNodeSpeed < getSettleSpeedThreshold()) {
+          settledFrameCount += 1;
+        } else {
+          settledFrameCount = 0;
+        }
+      }
+
+      render();
+
+      if (!dragNode && remainingPreTicks <= 0 && settledFrameCount >= 18) {
+        simRunning = false;
+        animationId = null;
+        return;
+      }
+
+      animationId = requestAnimationFrame(tick);
+    }
+
+    animationId = requestAnimationFrame(tick);
   }
 
   function hashString(value) {
@@ -379,40 +435,18 @@
 
     // Start or restart simulation
     if (animationId) cancelAnimationFrame(animationId);
+    animationId = null;
     hasFitted = false;
-    simRunning = true;
-    startSimulation();
-  }
+    remainingPreTicks = newNodes.length > 0 ? simConfig.preTicks : 0;
+    simulationAlpha = 1;
+    settledFrameCount = 0;
+    simRunning = false;
 
-  function startSimulation() {
-    remainingPreTicks = simConfig.preTicks;
-
-    let lastTime = performance.now();
-
-    function tick(now) {
-      const dt = Math.min((now - lastTime) / 16.67, 3);
-      lastTime = now;
-
-      if (nodes.length > 0) {
-        // Batch warm-up ticks per frame (time-budgeted)
-        const batchStart = performance.now();
-        while (remainingPreTicks > 0 && performance.now() - batchStart < 10) {
-          simulate(1);
-          remainingPreTicks--;
-        }
-
-        if (remainingPreTicks <= 0 && !hasFitted) {
-          fitGraphToViewport(0.86);
-          hasFitted = true;
-        }
-
-        simulate(dt);
-      }
+    if (newNodes.length > 0) {
+      startSimulationLoop();
+    } else {
       render();
-      animationId = requestAnimationFrame(tick);
     }
-
-    animationId = requestAnimationFrame(tick);
   }
 
   function getBounds(padding = simConfig.fitPadding) {
@@ -458,6 +492,10 @@
   function simulate(dt) {
     const cx = 0;
     const cy = 0;
+    const forceScale = Math.max(0.12, simulationAlpha);
+    const damping = clamp(simConfig.damping + (1 - forceScale) * 0.045, 0.84, 0.97);
+    const maxSpeed = Math.max(0.9, simConfig.maxSpeed * (0.45 + forceScale * 0.55));
+    let maxNodeSpeed = 0;
 
     for (let i = 0; i < nodes.length; i++) {
       for (let j = i + 1; j < nodes.length; j++) {
@@ -468,7 +506,7 @@
         let dist = Math.sqrt(dx * dx + dy * dy) || 1;
         const sameGroup = a.groupKey === b.groupKey;
         const repulsionMultiplier = sameGroup ? 0.82 : 1.35;
-        const force = (simConfig.repulsion * repulsionMultiplier * dt) / (dist * dist);
+        const force = (simConfig.repulsion * repulsionMultiplier * forceScale * dt) / (dist * dist);
         const fx = (dx / dist) * force;
         const fy = (dy / dist) * force;
         a.vx += fx;
@@ -482,7 +520,7 @@
           + (sameGroup ? 0 : 24);
         if (dist < minDistance) {
           const overlap = minDistance - dist;
-          const collisionForce = overlap * simConfig.collisionStrength * dt;
+          const collisionForce = overlap * simConfig.collisionStrength * forceScale * dt;
           const cfx = (dx / dist) * collisionForce;
           const cfy = (dy / dist) * collisionForce;
           a.vx += cfx;
@@ -503,7 +541,7 @@
       let dist = Math.sqrt(dx * dx + dy * dy) || 1;
       const targetLength = simConfig.springLength * (sameGroup ? 1 : simConfig.crossGroupSpringScale);
       const springStrength = simConfig.springStrength * (sameGroup ? 1 : simConfig.crossGroupSpringStrengthScale);
-      const force = (dist - targetLength) * springStrength * dt;
+      const force = (dist - targetLength) * springStrength * forceScale * dt;
       const fx = (dx / dist) * force;
       const fy = (dy / dist) * force;
       a.vx += fx;
@@ -523,25 +561,29 @@
 
       const anchor = groupAnchorByKey.get(node.groupKey);
       if (anchor) {
-        node.vx += (anchor.x - node.x) * simConfig.groupForce * dt;
-        node.vy += (anchor.y - node.y) * simConfig.groupForce * dt;
+        node.vx += (anchor.x - node.x) * simConfig.groupForce * forceScale * dt;
+        node.vy += (anchor.y - node.y) * simConfig.groupForce * forceScale * dt;
       }
 
-      node.vx += (cx - node.x) * simConfig.centerForce * dt;
-      node.vy += (cy - node.y) * simConfig.centerForce * dt;
+      node.vx += (cx - node.x) * simConfig.centerForce * forceScale * dt;
+      node.vy += (cy - node.y) * simConfig.centerForce * forceScale * dt;
 
-      node.vx *= simConfig.damping;
-      node.vy *= simConfig.damping;
+      node.vx *= damping;
+      node.vy *= damping;
 
       const speed = Math.sqrt(node.vx * node.vx + node.vy * node.vy);
-      if (speed > simConfig.maxSpeed) {
-        node.vx = (node.vx / speed) * simConfig.maxSpeed;
-        node.vy = (node.vy / speed) * simConfig.maxSpeed;
+      if (speed > maxSpeed) {
+        node.vx = (node.vx / speed) * maxSpeed;
+        node.vy = (node.vy / speed) * maxSpeed;
       }
+
+      maxNodeSpeed = Math.max(maxNodeSpeed, Math.sqrt(node.vx * node.vx + node.vy * node.vy));
 
       node.x += node.vx * dt;
       node.y += node.vy * dt;
     }
+
+    return maxNodeSpeed;
   }
 
   function getConnectedIds(focusId) {
@@ -811,6 +853,12 @@
     e.preventDefault();
     const pos = getWorldPos(e.clientX, e.clientY);
     const node = findNodeAt(pos.x, pos.y);
+
+    if (!simRunning && nodes.length > 0) {
+      simulationAlpha = Math.max(simulationAlpha, 0.45);
+      settledFrameCount = 0;
+      startSimulationLoop();
+    }
 
     if (node) {
       dragNode = node;
