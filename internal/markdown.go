@@ -13,13 +13,12 @@ import (
 )
 
 var (
-	wikiLinkRegex = regexp.MustCompile(`\[\[([^\]|]+)(?:\|([^\]]+))?\]\]`)
+	WikiLinkRegex = regexp.MustCompile(`\[\[([^\]|]+)(?:\|([^\]]+))?\]\]`)
 	tagRegex      = regexp.MustCompile(`(?:^|\s)(#[\w\-/]+)`)
 )
 
-func renderMarkdown(content []byte, vaultPath string) (string, error) {
-	// Pre-process wiki links and tags before goldmark
-	processed := preprocessObsidianSyntax(content, vaultPath)
+func renderMarkdown(content []byte, vaultPath string, index *VaultIndex) (string, error) {
+	processed := preprocessObsidianSyntax(content, vaultPath, index)
 
 	var buf bytes.Buffer
 	md := goldmark.New(
@@ -34,13 +33,11 @@ func renderMarkdown(content []byte, vaultPath string) (string, error) {
 	return buf.String(), nil
 }
 
-func preprocessObsidianSyntax(content []byte, vaultPath string) []byte {
+func preprocessObsidianSyntax(content []byte, vaultPath string, index *VaultIndex) []byte {
 	text := string(content)
 
-	// Protect code blocks and inline code from WikiLink/tag processing
 	var protected [][]string
 
-	// Protect fenced code blocks
 	fencedRegex := regexp.MustCompile("(?s)```.*?```")
 	text = fencedRegex.ReplaceAllStringFunc(text, func(match string) string {
 		placeholder := fmt.Sprintf("\x00PROTECTED_%d\x00", len(protected))
@@ -48,7 +45,6 @@ func preprocessObsidianSyntax(content []byte, vaultPath string) []byte {
 		return placeholder
 	})
 
-	// Protect inline code
 	inlineCodeRegex := regexp.MustCompile("`[^`]+`")
 	text = inlineCodeRegex.ReplaceAllStringFunc(text, func(match string) string {
 		placeholder := fmt.Sprintf("\x00PROTECTED_%d\x00", len(protected))
@@ -56,9 +52,8 @@ func preprocessObsidianSyntax(content []byte, vaultPath string) []byte {
 		return placeholder
 	})
 
-	// WikiLinks: [[Note Name]] or [[Note Name|Display Text]]
-	text = wikiLinkRegex.ReplaceAllStringFunc(text, func(match string) string {
-		groups := wikiLinkRegex.FindStringSubmatch(match)
+	text = WikiLinkRegex.ReplaceAllStringFunc(text, func(match string) string {
+		groups := WikiLinkRegex.FindStringSubmatch(match)
 		if groups == nil {
 			return match
 		}
@@ -69,16 +64,13 @@ func preprocessObsidianSyntax(content []byte, vaultPath string) []byte {
 			display = strings.TrimSpace(groups[2])
 		}
 
-		// Check if target exists
-		targetPath := findNotePath(target, vaultPath)
+		targetPath := findNotePath(target, vaultPath, index)
 		if targetPath != "" {
 			return fmt.Sprintf(`<a href="/note/%s" class="wikilink">%s</a>`, targetPath, display)
 		}
-		// Link to create page
 		return fmt.Sprintf(`<a href="/note/%s" class="wikilink missing" hx-confirm="Create note '%s'?">%s</a>`, targetPath, target, display)
 	})
 
-	// Tags: #tag
 	text = tagRegex.ReplaceAllStringFunc(text, func(match string) string {
 		groups := tagRegex.FindStringSubmatch(match)
 		if groups == nil {
@@ -88,7 +80,6 @@ func preprocessObsidianSyntax(content []byte, vaultPath string) []byte {
 		return fmt.Sprintf(` <a href="/search?q=%s" class="tag">%s</a>`, strings.TrimPrefix(tag, "#"), tag)
 	})
 
-	// Restore protected content
 	for i := len(protected) - 1; i >= 0; i-- {
 		text = strings.Replace(text, protected[i][0], protected[i][1], 1)
 	}
@@ -96,25 +87,27 @@ func preprocessObsidianSyntax(content []byte, vaultPath string) []byte {
 	return []byte(text)
 }
 
-func findNotePath(title string, vaultPath string) string {
-	// Strip .md extension if present
+func findNotePath(title string, vaultPath string, index *VaultIndex) string {
 	title = strings.TrimSuffix(title, ".md")
 
-	// If title contains a path separator, try exact path match first
+	if index != nil {
+		if p := index.FindPath(title); p != "" {
+			return p
+		}
+	}
+
 	if strings.Contains(title, "/") || strings.Contains(title, string(filepath.Separator)) {
 		candidate := filepath.Join(vaultPath, title+".md")
 		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
 			rel, _ := filepath.Rel(vaultPath, candidate)
 			return filepath.ToSlash(strings.TrimSuffix(rel, ".md"))
 		}
-		// Try case-insensitive path match by walking parent directories
 		parts := strings.Split(filepath.ToSlash(title), "/")
 		if found := findCaseInsensitivePath(vaultPath, parts); found != "" {
 			return found
 		}
 	}
 
-	// Fallback: match by filename only across the entire vault
 	var found string
 	filepath.Walk(vaultPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
@@ -130,7 +123,6 @@ func findNotePath(title string, vaultPath string) string {
 	return found
 }
 
-// findCaseInsensitivePath walks the vault trying to match each path segment case-insensitively.
 func findCaseInsensitivePath(vaultPath string, parts []string) string {
 	currentPath := vaultPath
 	for i, part := range parts {
@@ -149,14 +141,12 @@ func findCaseInsensitivePath(vaultPath string, parts []string) string {
 		if !matched {
 			return ""
 		}
-		// Last part must be a file (with .md extension)
 		if i == len(parts)-1 {
 			info, err := os.Stat(currentPath + ".md")
 			if err == nil && !info.IsDir() {
 				rel, _ := filepath.Rel(vaultPath, currentPath+".md")
 				return filepath.ToSlash(strings.TrimSuffix(rel, ".md"))
 			}
-			// Also check if it's already a file without adding .md
 			info, err = os.Stat(currentPath)
 			if err == nil && !info.IsDir() {
 				rel, _ := filepath.Rel(vaultPath, currentPath)
@@ -164,7 +154,6 @@ func findCaseInsensitivePath(vaultPath string, parts []string) string {
 			}
 			return ""
 		}
-		// Intermediate parts must be directories
 		if info, err := os.Stat(currentPath); err != nil || !info.IsDir() {
 			return ""
 		}
@@ -172,7 +161,6 @@ func findCaseInsensitivePath(vaultPath string, parts []string) string {
 	return ""
 }
 
-// Extract frontmatter and body from markdown content
 func parseNote(content []byte) (frontmatter map[string]interface{}, body []byte) {
 	frontmatter = make(map[string]interface{})
 	body = content
@@ -186,7 +174,6 @@ func parseNote(content []byte) (frontmatter map[string]interface{}, body []byte)
 		return
 	}
 
-	// Simple YAML parsing for common fields
 	fmText := string(parts[1])
 	lines := strings.Split(fmText, "\n")
 	for _, line := range lines {

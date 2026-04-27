@@ -2,18 +2,29 @@ package internal
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 )
+
+const maxBodySize = 10 << 20 // 10 MB
 
 func writeJSON(w http.ResponseWriter, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(data)
+}
+
+func safeVaultPath(vaultPath, input string) (string, error) {
+	clean := filepath.Clean(filepath.Join(vaultPath, input))
+	cleanVault := filepath.Clean(vaultPath)
+	if !strings.HasPrefix(clean, cleanVault+string(filepath.Separator)) && clean != cleanVault {
+		return "", errors.New("path escapes vault")
+	}
+	return clean, nil
 }
 
 func (fs *FileSystem) HandleAPIFileTree(w http.ResponseWriter, r *http.Request) {
@@ -33,7 +44,12 @@ func (fs *FileSystem) HandleAPIViewNote(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	fullPath := filepath.Join(fs.VaultPath, path+".md")
+	fullPath, err := safeVaultPath(fs.VaultPath, path+".md")
+	if err != nil {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+
 	content, err := os.ReadFile(fullPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -45,7 +61,7 @@ func (fs *FileSystem) HandleAPIViewNote(w http.ResponseWriter, r *http.Request) 
 	}
 
 	frontmatter, body := parseNote(content)
-	html, err := renderMarkdown(body, fs.VaultPath)
+	html, err := renderMarkdown(body, fs.VaultPath, fs.index)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -68,14 +84,19 @@ func (fs *FileSystem) HandleAPISaveNote(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	content, err := io.ReadAll(r.Body)
+	content, err := io.ReadAll(io.LimitReader(r.Body, maxBodySize))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	defer r.Body.Close()
 
-	fullPath := filepath.Join(fs.VaultPath, path+".md")
+	fullPath, err := safeVaultPath(fs.VaultPath, path+".md")
+	if err != nil {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+
 	_, statErr := os.Stat(fullPath)
 	isNewNote := os.IsNotExist(statErr)
 	dir := filepath.Dir(fullPath)
@@ -99,7 +120,7 @@ func (fs *FileSystem) HandleAPICreateNote(w http.ResponseWriter, r *http.Request
 	var req struct {
 		Path string `json:"path"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxBodySize)).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -109,7 +130,12 @@ func (fs *FileSystem) HandleAPICreateNote(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	fullPath := filepath.Join(fs.VaultPath, req.Path+".md")
+	fullPath, err := safeVaultPath(fs.VaultPath, req.Path+".md")
+	if err != nil {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+
 	if _, err := os.Stat(fullPath); err == nil {
 		http.Error(w, "Note already exists", http.StatusConflict)
 		return
@@ -136,7 +162,7 @@ func (fs *FileSystem) HandleAPICreateFolder(w http.ResponseWriter, r *http.Reque
 	var req struct {
 		Path string `json:"path"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxBodySize)).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -146,7 +172,12 @@ func (fs *FileSystem) HandleAPICreateFolder(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	fullPath := filepath.Join(fs.VaultPath, req.Path)
+	fullPath, err := safeVaultPath(fs.VaultPath, req.Path)
+	if err != nil {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+
 	if err := os.MkdirAll(fullPath, 0755); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -162,7 +193,7 @@ func (fs *FileSystem) HandleAPIRename(w http.ResponseWriter, r *http.Request) {
 		Old string `json:"old"`
 		New string `json:"new"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxBodySize)).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -172,15 +203,29 @@ func (fs *FileSystem) HandleAPIRename(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	oldFull := filepath.Join(fs.VaultPath, req.Old)
-	newFull := filepath.Join(fs.VaultPath, req.New)
+	oldFull, err := safeVaultPath(fs.VaultPath, req.Old)
+	if err != nil {
+		http.Error(w, "Invalid old path", http.StatusBadRequest)
+		return
+	}
+	newFull, err := safeVaultPath(fs.VaultPath, req.New)
+	if err != nil {
+		http.Error(w, "Invalid new path", http.StatusBadRequest)
+		return
+	}
 
 	if err := os.Rename(oldFull, newFull); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	fs.NotifyVaultChange([]string{req.Old, req.New}, true, true, true, true)
+	relOld := strings.TrimSuffix(filepath.ToSlash(req.Old), ".md")
+	relNew := strings.TrimSuffix(filepath.ToSlash(req.New), ".md")
+	if fs.index != nil {
+		fs.index.RenameFile(relOld, relNew)
+	}
+
+	fs.NotifyVaultChange([]string{relOld, relNew}, true, true, true, true)
 
 	w.WriteHeader(http.StatusOK)
 }
@@ -192,10 +237,20 @@ func (fs *FileSystem) HandleAPIDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fullPath := filepath.Join(fs.VaultPath, path)
+	fullPath, err := safeVaultPath(fs.VaultPath, path)
+	if err != nil {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+
 	if err := os.RemoveAll(fullPath); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+
+	relPath := filepath.ToSlash(path)
+	if fs.index != nil {
+		fs.index.RemoveFile(relPath)
 	}
 
 	fs.NotifyVaultChange([]string{path}, true, true, true, true)
@@ -207,6 +262,19 @@ func (fs *FileSystem) HandleAPISearch(w http.ResponseWriter, r *http.Request) {
 	query := strings.ToLower(r.URL.Query().Get("q"))
 	if query == "" {
 		writeJSON(w, []map[string]string{})
+		return
+	}
+
+	if fs.index != nil {
+		results := fs.index.Search(query)
+		output := make([]map[string]string, len(results))
+		for i, r := range results {
+			output[i] = map[string]string{
+				"path":  r.Path,
+				"title": r.Title,
+			}
+		}
+		writeJSON(w, output)
 		return
 	}
 
@@ -239,6 +307,19 @@ func (fs *FileSystem) HandleAPIBacklinks(w http.ResponseWriter, r *http.Request)
 	path := r.PathValue("path")
 	if path == "" {
 		http.Error(w, "Path required", http.StatusBadRequest)
+		return
+	}
+
+	if fs.index != nil {
+		results := fs.index.GetBacklinks(path)
+		output := make([]map[string]string, len(results))
+		for i, r := range results {
+			output[i] = map[string]string{
+				"path":  r.Path,
+				"title": r.Title,
+			}
+		}
+		writeJSON(w, output)
 		return
 	}
 
@@ -275,21 +356,18 @@ func (fs *FileSystem) HandleAPIBacklinks(w http.ResponseWriter, r *http.Request)
 }
 
 func (fs *FileSystem) HandleAPIGraph(w http.ResponseWriter, r *http.Request) {
-	type GraphNode struct {
-		ID    string `json:"id"`
-		Title string `json:"title"`
-	}
-	type GraphLink struct {
-		Source string `json:"source"`
-		Target string `json:"target"`
+	if fs.index != nil {
+		nodes, links := fs.index.GetGraph()
+		writeJSON(w, map[string]interface{}{
+			"nodes": nodes,
+			"links": links,
+		})
+		return
 	}
 
 	nodes := make(map[string]GraphNode)
-	links := make([]GraphLink, 0)
+	var links []GraphLink
 
-	wikiLinkRegex := regexp.MustCompile(`\[\[([^\]|]+)(?:\|[^\]]+)?\]\]`)
-
-	// First pass: collect all nodes
 	filepath.Walk(fs.VaultPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() || !strings.HasSuffix(info.Name(), ".md") {
 			return nil
@@ -303,7 +381,6 @@ func (fs *FileSystem) HandleAPIGraph(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 
-	// Second pass: collect links
 	filepath.Walk(fs.VaultPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() || !strings.HasSuffix(info.Name(), ".md") {
 			return nil
@@ -317,15 +394,14 @@ func (fs *FileSystem) HandleAPIGraph(w http.ResponseWriter, r *http.Request) {
 			return nil
 		}
 
-		matches := wikiLinkRegex.FindAllStringSubmatch(string(content), -1)
+		matches := WikiLinkRegex.FindAllStringSubmatch(string(content), -1)
 		for _, m := range matches {
 			if len(m) < 2 {
 				continue
 			}
 			targetName := strings.TrimSpace(m[1])
-			targetPath := findNotePath(targetName, fs.VaultPath)
+			targetPath := findNotePath(targetName, fs.VaultPath, fs.index)
 			if targetPath != "" && targetPath != rel {
-				// Only add link if target node exists in our graph
 				if _, ok := nodes[targetPath]; ok {
 					links = append(links, GraphLink{Source: rel, Target: targetPath})
 				}
@@ -347,15 +423,15 @@ func (fs *FileSystem) HandleAPIGraph(w http.ResponseWriter, r *http.Request) {
 }
 
 func (fs *FileSystem) HandleAPIPreview(w http.ResponseWriter, r *http.Request) {
-	_ = r.PathValue("path") // path is part of route but not needed for preview
-	content, err := io.ReadAll(r.Body)
+	_ = r.PathValue("path")
+	content, err := io.ReadAll(io.LimitReader(r.Body, maxBodySize))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	defer r.Body.Close()
 
-	html, err := renderMarkdown(content, fs.VaultPath)
+	html, err := renderMarkdown(content, fs.VaultPath, fs.index)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

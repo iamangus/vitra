@@ -3,6 +3,7 @@ package internal
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -34,6 +35,7 @@ type LiveSync struct {
 	debounce     *time.Timer
 	version      int64
 	watcher      *fsnotify.Watcher
+	index        *VaultIndex
 }
 
 func NewLiveSync() *LiveSync {
@@ -42,6 +44,12 @@ func NewLiveSync() *LiveSync {
 		pending:      VaultEvent{Type: "vault.changed"},
 		pendingPaths: make(map[string]struct{}),
 	}
+}
+
+func (ls *LiveSync) SetIndex(idx *VaultIndex) {
+	ls.mu.Lock()
+	ls.index = idx
+	ls.mu.Unlock()
 }
 
 func (ls *LiveSync) Start(vaultPath string) error {
@@ -206,10 +214,11 @@ func (ls *LiveSync) watch(vaultPath string, watcher *fsnotify.Watcher) {
 				return
 			}
 			ls.handleWatcherEvent(vaultPath, watcher, event)
-		case _, ok := <-watcher.Errors:
+		case err, ok := <-watcher.Errors:
 			if !ok {
 				return
 			}
+			log.Printf("vault watcher error: %v", err)
 		}
 	}
 }
@@ -235,12 +244,26 @@ func (ls *LiveSync) handleWatcherEvent(vaultPath string, watcher *fsnotify.Watch
 	}
 
 	treeChanged := !isMarkdown && event.Op&(fsnotify.Create|fsnotify.Remove|fsnotify.Rename) != 0
-	if isMarkdown && event.Op&(fsnotify.Create|fsnotify.Remove|fsnotify.Rename) != 0 {
+	markdownTreeChanged := isMarkdown && event.Op&(fsnotify.Create|fsnotify.Remove|fsnotify.Rename) != 0
+	if markdownTreeChanged {
 		treeChanged = true
 	}
 
 	if !treeChanged && !isMarkdown {
 		return
+	}
+
+	ls.mu.Lock()
+	idx := ls.index
+	ls.mu.Unlock()
+
+	if idx != nil && isMarkdown {
+		if event.Op&fsnotify.Remove != 0 || event.Op&fsnotify.Rename != 0 {
+			idx.RemoveFile(normalizedPath)
+		}
+		if event.Op&(fsnotify.Create|fsnotify.Write) != 0 {
+			idx.UpdateFile(vaultPath, normalizedPath)
+		}
 	}
 
 	ls.Notify(

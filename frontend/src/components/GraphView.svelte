@@ -43,6 +43,8 @@
   let hasFitted = false;
   let simulationAlpha = 1;
   let settledFrameCount = 0;
+  let userManipulatedView = false;
+  let resizeObserverCreated = false;
 
   onMount(() => {
     dpr = window.devicePixelRatio || 1;
@@ -66,31 +68,31 @@
     };
   });
 
-  // Canvas + ResizeObserver setup (reactive to container/canvas binding)
+  // Canvas setup (reactive to container/canvas binding)
   $effect(() => {
     if (!canvas || !container) return;
 
     ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    resizeCanvas();
+    const rect = container.getBoundingClientRect();
+    const w = Math.max(1, Math.floor(rect.width));
+    const h = Math.max(1, Math.floor(rect.height));
+    const needResize = canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr);
 
-    if (!resizeObserver) {
-      resizeObserver = new ResizeObserver(() => {
-        resizeCanvas();
-        if (nodes.length > 0) {
-          fitGraphToViewport(0.86);
-        }
-      });
-      resizeObserver.observe(container);
+    if (needResize) {
+      resizeCanvas();
     }
 
-    return () => {
-      if (resizeObserver) {
-        resizeObserver.disconnect();
-        resizeObserver = null;
-      }
-    };
+    if (resizeObserverCreated) return;
+    resizeObserverCreated = true;
+
+    resizeObserver = new ResizeObserver(() => {
+      resizeCanvas();
+      if (userManipulatedView || nodes.length === 0) return;
+      fitGraphToViewport(0.9);
+    });
+    resizeObserver.observe(container);
   });
 
   // Window-level mouse events
@@ -139,8 +141,8 @@
           remainingPreTicks--;
         }
 
-        if (remainingPreTicks <= 0 && !hasFitted) {
-          fitGraphToViewport(0.86);
+        if (remainingPreTicks <= 0 && !hasFitted && !userManipulatedView) {
+          fitGraphToViewport(0.9);
           hasFitted = true;
         }
 
@@ -160,7 +162,7 @@
 
       render();
 
-      if (!dragNode && remainingPreTicks <= 0 && settledFrameCount >= 18) {
+      if (!dragNode && !isDragging && remainingPreTicks <= 0 && settledFrameCount >= 18) {
         simRunning = false;
         animationId = null;
         return;
@@ -183,15 +185,6 @@
   function deriveGroupKey(nodeId) {
     const parts = nodeId.split('/').filter(Boolean);
     if (parts.length <= 1) return nodeId;
-
-    if (parts[0] === 'k8s-cluster' && parts[1] === 'Layers' && parts.length >= 3) {
-      return parts.slice(0, 3).join('/');
-    }
-
-    if (parts[0] === 'k8s-cluster') {
-      return parts.slice(0, Math.min(2, parts.length)).join('/');
-    }
-
     return parts.slice(0, Math.min(2, parts.length)).join('/');
   }
 
@@ -200,9 +193,13 @@
     const rect = container.getBoundingClientRect();
     const w = Math.max(1, Math.floor(rect.width));
     const h = Math.max(1, Math.floor(rect.height));
+    const targetW = Math.round(w * dpr);
+    const targetH = Math.round(h * dpr);
 
-    canvas.width = w * dpr;
-    canvas.height = h * dpr;
+    if (canvas.width !== targetW || canvas.height !== targetH) {
+      canvas.width = targetW;
+      canvas.height = targetH;
+    }
     canvas.style.width = w + 'px';
     canvas.style.height = h + 'px';
 
@@ -211,7 +208,6 @@
 
   async function loadGraph() {
     error = null;
-
     try {
       const data = await graph.get();
       if (!data || !Array.isArray(data.nodes)) {
@@ -436,7 +432,8 @@
     // Start or restart simulation
     if (animationId) cancelAnimationFrame(animationId);
     animationId = null;
-    hasFitted = false;
+    hasFitted = hadLayout;
+    if (!hadLayout) userManipulatedView = false;
     remainingPreTicks = newNodes.length > 0 ? simConfig.preTicks : 0;
     simulationAlpha = 1;
     settledFrameCount = 0;
@@ -601,23 +598,6 @@
     return connectedIds;
   }
 
-  function getConnectedNodes(focusId) {
-    if (!focusId) return [];
-
-    const connectedIds = getConnectedIds(focusId);
-    connectedIds.delete(focusId);
-
-    return [...connectedIds]
-      .map((id) => nodes[nodeIndexById.get(id)])
-      .filter(Boolean)
-      .sort((a, b) => b.links - a.links || a.title.localeCompare(b.title));
-  }
-
-  function getFocusedDetailNode() {
-    if (hoverNode) return hoverNode;
-    if (!selectedNodeId) return null;
-    return nodes[nodeIndexById.get(selectedNodeId)] || null;
-  }
 
   function getVisibleWorldRect(width, height) {
     return {
@@ -854,7 +834,9 @@
     const pos = getWorldPos(e.clientX, e.clientY);
     const node = findNodeAt(pos.x, pos.y);
 
-    if (!simRunning && nodes.length > 0) {
+    if (nodes.length > 0) {
+      simRunning = false;
+      if (animationId) { cancelAnimationFrame(animationId); animationId = null; }
       simulationAlpha = Math.max(simulationAlpha, 0.45);
       settledFrameCount = 0;
       startSimulationLoop();
@@ -901,13 +883,19 @@
         if (Math.abs(e.clientX - dragStartPos.x) > 2 || Math.abs(e.clientY - dragStartPos.y) > 2) {
           movedDuringDrag = true;
           suppressClick = true;
+          userManipulatedView = true;
         }
         transform = { ...transform, x: transform.x + dx, y: transform.y + dy };
+        if (!simRunning) render();
       }
     } else {
+      const prevHover = hoverNode;
       const pos = getWorldPos(e.clientX, e.clientY);
       hoverNode = findNodeAt(pos.x, pos.y);
       if (canvas) canvas.style.cursor = hoverNode ? 'pointer' : 'grab';
+      if (hoverNode !== prevHover && !simRunning) {
+        render();
+      }
     }
   }
 
@@ -953,9 +941,12 @@
       y: my - (my - transform.y) * (newK / transform.k),
       k: newK,
     };
+    userManipulatedView = true;
   }
 
   function resetView() {
+    userManipulatedView = false;
+    hasFitted = false;
     fitGraphToViewport(0.9);
   }
 </script>
@@ -1006,18 +997,6 @@
         <span class="graph-info emphasis">Click selected note again to open it</span>
       {/if}
     </div>
-    {@const detailNode = getFocusedDetailNode()}
-    {#if detailNode}
-      <div class="hover-details">
-        <div class="hover-details-title">{detailNode.title}</div>
-        <div class="hover-details-subtitle">{getConnectedNodes(detailNode.id).length} connected notes</div>
-        <div class="hover-details-list">
-          {#each getConnectedNodes(detailNode.id) as node (node.id)}
-            <div class="hover-details-item">{node.title}</div>
-          {/each}
-        </div>
-      </div>
-    {/if}
   {/if}
 </div>
 
@@ -1147,62 +1126,4 @@
     pointer-events: none;
   }
 
-  .hover-details {
-    position: absolute;
-    top: 1rem;
-    right: 1rem;
-    width: min(22rem, calc(100% - 2rem));
-    max-height: min(60%, 32rem);
-    overflow: hidden;
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
-    padding: 0.9rem;
-    border-radius: var(--radius-md);
-    background: color-mix(in srgb, var(--bg-elevated) 94%, transparent);
-    border: 1px solid var(--border-color);
-    box-shadow: var(--shadow-md);
-    z-index: 10;
-    backdrop-filter: blur(10px);
-  }
-
-  .hover-details-title {
-    font-size: 0.9rem;
-    font-weight: 600;
-    color: var(--color);
-    line-height: 1.3;
-  }
-
-  .hover-details-subtitle {
-    font-size: 0.75rem;
-    color: var(--color-muted);
-  }
-
-  .hover-details-list {
-    overflow: auto;
-    display: flex;
-    flex-direction: column;
-    gap: 0.35rem;
-    padding-right: 0.25rem;
-  }
-
-  .hover-details-item {
-    font-size: 0.8rem;
-    color: var(--color);
-    line-height: 1.35;
-    padding: 0.35rem 0.45rem;
-    border-radius: var(--radius-sm);
-    background: color-mix(in srgb, var(--hover-bg) 80%, transparent);
-  }
-
-  @media (max-width: 768px) {
-    .hover-details {
-      top: auto;
-      right: 0.75rem;
-      bottom: 4rem;
-      left: 0.75rem;
-      width: auto;
-      max-height: 40%;
-    }
-  }
 </style>

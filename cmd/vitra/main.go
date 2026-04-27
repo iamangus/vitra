@@ -18,12 +18,14 @@ func main() {
 	}
 
 	fs := internal.NewFileSystem(vaultPath)
+	if err := fs.BuildIndex(); err != nil {
+		log.Fatalf("failed to build vault index: %v", err)
+	}
 	if err := fs.StartWatcher(); err != nil {
 		log.Fatalf("failed to start vault watcher: %v", err)
 	}
 	defer fs.CloseWatcher()
 
-	// API routes
 	http.HandleFunc("GET /api/files", fs.HandleAPIFileTree)
 	http.HandleFunc("GET /api/events", fs.HandleAPIEvents)
 	http.HandleFunc("GET /api/note/{path...}", fs.HandleAPIViewNote)
@@ -43,9 +45,7 @@ func main() {
 	}
 	fileServer := http.FileServer(http.FS(distFS))
 
-	// SPA fallback: serve index.html for non-API, non-file routes
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		// API routes should not fall through to SPA
 		if strings.HasPrefix(r.URL.Path, "/api/") {
 			http.NotFound(w, r)
 			return
@@ -58,7 +58,6 @@ func main() {
 
 		info, err := iofs.Stat(distFS, assetPath)
 		if err != nil || info.IsDir() || r.URL.Path == "/" {
-			// Serve index.html for SPA routes
 			http.ServeFileFS(w, r, distFS, "index.html")
 			return
 		}
