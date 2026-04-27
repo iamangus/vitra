@@ -365,60 +365,9 @@ func (fs *FileSystem) HandleAPIGraph(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	nodes := make(map[string]GraphNode)
-	var links []GraphLink
-
-	filepath.Walk(fs.VaultPath, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() || !strings.HasSuffix(info.Name(), ".md") {
-			return nil
-		}
-
-		rel, _ := filepath.Rel(fs.VaultPath, path)
-		rel = strings.TrimSuffix(filepath.ToSlash(rel), ".md")
-		title := strings.TrimSuffix(info.Name(), ".md")
-
-		nodes[rel] = GraphNode{ID: rel, Title: title}
-		return nil
-	})
-
-	filepath.Walk(fs.VaultPath, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() || !strings.HasSuffix(info.Name(), ".md") {
-			return nil
-		}
-
-		rel, _ := filepath.Rel(fs.VaultPath, path)
-		rel = strings.TrimSuffix(filepath.ToSlash(rel), ".md")
-
-		content, err := os.ReadFile(path)
-		if err != nil {
-			return nil
-		}
-
-		matches := WikiLinkRegex.FindAllStringSubmatch(string(content), -1)
-		for _, m := range matches {
-			if len(m) < 2 {
-				continue
-			}
-			targetName := strings.TrimSpace(m[1])
-			targetPath := findNotePath(targetName, fs.VaultPath, fs.index)
-			if targetPath != "" && targetPath != rel {
-				if _, ok := nodes[targetPath]; ok {
-					links = append(links, GraphLink{Source: rel, Target: targetPath})
-				}
-			}
-		}
-
-		return nil
-	})
-
-	nodeList := make([]GraphNode, 0, len(nodes))
-	for _, n := range nodes {
-		nodeList = append(nodeList, n)
-	}
-
 	writeJSON(w, map[string]interface{}{
-		"nodes": nodeList,
-		"links": links,
+		"nodes": []GraphNode{},
+		"links": []GraphLink{},
 	})
 }
 

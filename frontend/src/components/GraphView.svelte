@@ -21,7 +21,7 @@
   let dragNode = $state(null);
   let hoverNode = $state(null);
   let selectedNodeId = $state(null);
-  let mousePos = $state({ x: 0, y: 0 });
+  let mousePos = { x: 0, y: 0 };
   let dragWorldPos = $state({ x: 0, y: 0 });
   let dragStartPos = $state({ x: 0, y: 0 });
   let movedDuringDrag = $state(false);
@@ -39,7 +39,6 @@
   let simConfig = null;
   let simRunning = false;
   let dpr = 1;
-  let remainingPreTicks = 0;
   let hasFitted = false;
   let simulationAlpha = 1;
   let settledFrameCount = 0;
@@ -135,25 +134,20 @@
       lastTime = now;
 
       if (nodes.length > 0) {
-        const batchStart = performance.now();
-        while (remainingPreTicks > 0 && performance.now() - batchStart < 10) {
-          simulate(1);
-          remainingPreTicks--;
-        }
 
-        if (remainingPreTicks <= 0 && !hasFitted && !userManipulatedView) {
+        if (!hasFitted && !userManipulatedView) {
           fitGraphToViewport(0.9);
           hasFitted = true;
         }
 
         const maxNodeSpeed = simulate(dt);
         const minAlpha = dragNode ? 0.28 : 0.12;
-        const decay = remainingPreTicks > 0 ? 0.994 : (dragNode ? 0.992 : 0.972);
+        const decay = dragNode ? 0.992 : 0.972;
         simulationAlpha = Math.max(minAlpha, simulationAlpha * decay);
 
         if (dragNode) {
           settledFrameCount = 0;
-        } else if (remainingPreTicks <= 0 && maxNodeSpeed < getSettleSpeedThreshold()) {
+        } else if (maxNodeSpeed < getSettleSpeedThreshold()) {
           settledFrameCount += 1;
         } else {
           settledFrameCount = 0;
@@ -162,7 +156,7 @@
 
       render();
 
-      if (!dragNode && !isDragging && remainingPreTicks <= 0 && settledFrameCount >= 18) {
+      if (!dragNode && !isDragging && settledFrameCount >= 18) {
         simRunning = false;
         animationId = null;
         return;
@@ -237,8 +231,8 @@
       springStrength: clamp(0.09 - density * 0.08, 0.015, 0.08),
       damping: clamp(0.91 - density * 0.05, 0.84, 0.92),
       centerForce: clamp(0.006 - safeNodeCount * 0.00003 - density * 0.002, 0.0012, 0.0045),
-      maxSpeed: clamp(3 + Math.sqrt(safeNodeCount) * 0.18, 3, 7),
-      preTicks: Math.round(clamp(220 + safeNodeCount * 7 + linkCount * 0.7, 220, 1200)),
+      maxSpeed: clamp(6 + Math.sqrt(safeNodeCount) * 0.36, 6, 14),
+      maxJerk: 1.5,
       fitPadding: Math.round(135 + Math.sqrt(safeNodeCount) * 20 + avgDegree * 8),
       labelZoomThreshold: safeNodeCount > 60 ? 1.1 : 0.9,
       detailZoomThreshold: safeNodeCount > 60 ? 1.55 : 1.25,
@@ -376,6 +370,8 @@
       y: existingNodesById.get(n.id)?.y ?? 0,
       vx: existingNodesById.get(n.id)?.vx ?? 0,
       vy: existingNodesById.get(n.id)?.vy ?? 0,
+      prevVX: existingNodesById.get(n.id)?.prevVX,
+      prevVY: existingNodesById.get(n.id)?.prevVY,
       radius: 4,
       links: 0,
       isNew: !existingNodesById.has(n.id),
@@ -385,10 +381,12 @@
       nextNodeIndexById.set(node.id, nextNodeIndexById.size);
     }
 
-    const newLinks = data.links.map((link) => ({
-      sourceId: link.source,
-      targetId: link.target,
-    })).filter((link) => nextNodeIndexById.has(link.sourceId) && nextNodeIndexById.has(link.targetId));
+    const newLinks = data.links
+      .filter((link) => nextNodeIndexById.has(link.source) && nextNodeIndexById.has(link.target))
+      .map((link) => ({
+        sourceId: link.source,
+        targetId: link.target,
+      }));
 
     for (const link of newLinks) {
       const source = newNodes[nextNodeIndexById.get(link.sourceId)];
@@ -434,7 +432,6 @@
     animationId = null;
     hasFitted = hadLayout;
     if (!hadLayout) userManipulatedView = false;
-    remainingPreTicks = newNodes.length > 0 ? simConfig.preTicks : 0;
     simulationAlpha = 1;
     settledFrameCount = 0;
     simRunning = false;
@@ -446,7 +443,8 @@
     }
   }
 
-  function getBounds(padding = simConfig.fitPadding) {
+  function getBounds(padding) {
+    if (padding === undefined) padding = simConfig.fitPadding;
     let minX = Infinity;
     let maxX = -Infinity;
     let minY = Infinity;
@@ -574,6 +572,19 @@
         node.vy = (node.vy / speed) * maxSpeed;
       }
 
+      const jerkLimit = dragNode ? Infinity : simConfig.maxJerk;
+      if (node.prevVX !== undefined) {
+        const dVx = node.vx - node.prevVX;
+        const dVy = node.vy - node.prevVY;
+        const dV = Math.sqrt(dVx * dVx + dVy * dVy);
+        if (dV > jerkLimit) {
+          node.vx = node.prevVX + (dVx / dV) * jerkLimit;
+          node.vy = node.prevVY + (dVy / dV) * jerkLimit;
+        }
+      }
+      node.prevVX = node.vx;
+      node.prevVY = node.vy;
+
       maxNodeSpeed = Math.max(maxNodeSpeed, Math.sqrt(node.vx * node.vx + node.vy * node.vy));
 
       node.x += node.vx * dt;
@@ -656,6 +667,12 @@
     const textColor = isDark ? 'rgba(240, 240, 245, 0.92)' : 'rgba(26, 26, 30, 0.92)';
     const mutedTextColor = isDark ? 'rgba(240, 240, 245, 0.78)' : 'rgba(26, 26, 30, 0.78)';
 
+    const hoverLinkColor = isDark ? 'rgba(192, 132, 252, 0.78)' : 'rgba(109, 40, 217, 0.75)';
+    const selectionLinkColor = isDark ? 'rgba(168, 85, 247, 0.68)' : 'rgba(124, 58, 237, 0.68)';
+    const defaultFillColor = isDark ? 'rgba(168, 85, 247, 0.82)' : 'rgba(124, 58, 237, 0.82)';
+    const selectedOutlineColor = isDark ? 'rgba(168, 85, 247, 0.55)' : 'rgba(124, 58, 237, 0.55)';
+    const hoverOutlineColor = isDark ? 'rgba(192, 132, 252, 0.65)' : 'rgba(109, 40, 217, 0.65)';
+
     for (const link of links) {
       const source = nodes[nodeIndexById.get(link.sourceId)];
       const target = nodes[nodeIndexById.get(link.targetId)];
@@ -669,9 +686,9 @@
       ctx.moveTo(source.x, source.y);
       ctx.lineTo(target.x, target.y);
       ctx.strokeStyle = touchesHover
-        ? (isDark ? 'rgba(192, 132, 252, 0.78)' : 'rgba(109, 40, 217, 0.75)')
+        ? hoverLinkColor
         : (touchesSelection
-          ? (isDark ? 'rgba(168, 85, 247, 0.68)' : 'rgba(124, 58, 237, 0.68)')
+          ? selectionLinkColor
           : (hasSelection ? dimLinkColor : (sameGroup ? defaultLinkColor : crossGroupLinkColor)));
       ctx.lineWidth = touchesHover ? 1.8 : (touchesSelection ? 1.5 : 1);
       ctx.stroke();
@@ -688,15 +705,15 @@
       ctx.arc(node.x, node.y, node.radius, 0, Math.PI * 2);
       ctx.fillStyle = isHover
         ? hoverColor
-        : (isSelected || linkedToSelection || linkedToHover ? nodeColor : (dimmed ? dimNodeColor : (isDark ? 'rgba(168, 85, 247, 0.82)' : 'rgba(124, 58, 237, 0.82)')));
+        : (isSelected || linkedToSelection || linkedToHover ? nodeColor : (dimmed ? dimNodeColor : defaultFillColor));
       ctx.fill();
 
       if (isSelected || isHover || linkedToSelection) {
         ctx.beginPath();
         ctx.arc(node.x, node.y, node.radius + 3, 0, Math.PI * 2);
         ctx.strokeStyle = isHover
-          ? (isDark ? 'rgba(192, 132, 252, 0.65)' : 'rgba(109, 40, 217, 0.65)')
-          : (isDark ? 'rgba(168, 85, 247, 0.55)' : 'rgba(124, 58, 237, 0.55)');
+          ? hoverOutlineColor
+          : selectedOutlineColor;
         ctx.lineWidth = isSelected ? 1.6 : 1;
         ctx.stroke();
       }
@@ -706,8 +723,10 @@
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
 
-    const primaryCandidates = [];
-    const backgroundCandidates = [];
+    const primaryCandidates = new Array(nodes.length);
+    let pc = 0;
+    const backgroundCandidates = new Array(nodes.length);
+    let bc = 0;
 
     for (const node of nodes) {
       if (!isNodeVisible(node, visibleWorld)) continue;
@@ -727,44 +746,50 @@
               : linkedToSelection
                 ? 700
                 : 500;
-        primaryCandidates.push({
+        primaryCandidates[pc++] = {
           node,
           priority: priority + node.links,
           force: true,
           textColor: isHover || isSelected || linkedToHover || linkedToSelection ? textColor : mutedTextColor,
           background: true,
-        });
+        };
         continue;
       }
 
       if (isHover) {
-        primaryCandidates.push({ node, priority: 1000, force: true, textColor, background: true });
+        primaryCandidates[pc++] = { node, priority: 1000, force: true, textColor, background: true };
         continue;
       }
 
       if (isSelected) {
-        primaryCandidates.push({ node, priority: 900, force: true, textColor, background: true });
+        primaryCandidates[pc++] = { node, priority: 900, force: true, textColor, background: true };
         continue;
       }
 
       if (transform.k >= simConfig.labelZoomThreshold && linkedToSelection) {
-        primaryCandidates.push({ node, priority: 700 + node.links, force: false, textColor, background: true });
+        primaryCandidates[pc++] = { node, priority: 700 + node.links, force: false, textColor, background: true };
         continue;
       }
 
       if (linkedToHover) {
-        primaryCandidates.push({ node, priority: 800 + node.links, force: true, textColor, background: true });
+        primaryCandidates[pc++] = { node, priority: 800 + node.links, force: true, textColor, background: true };
         continue;
       }
 
       if (transform.k >= simConfig.detailZoomThreshold && node.links >= simConfig.idleLabelDegreeThreshold) {
-        backgroundCandidates.push({ node, priority: 400 + node.links, force: false, textColor: mutedTextColor, background: true });
+        backgroundCandidates[bc++] = { node, priority: 400 + node.links, force: false, textColor: mutedTextColor, background: true };
       }
     }
 
-    backgroundCandidates.sort((a, b) => b.priority - a.priority);
-    const labelCandidates = [...primaryCandidates, ...backgroundCandidates.slice(0, simConfig.backgroundLabelLimit)]
-      .sort((a, b) => b.priority - a.priority);
+    const bgArray = new Array(bc);
+    for (let i = 0; i < bc; i++) bgArray[i] = backgroundCandidates[i];
+    bgArray.sort((a, b) => b.priority - a.priority);
+    primaryCandidates.length = pc;
+    const labelCandidates = new Array(pc + Math.min(bc, simConfig.backgroundLabelLimit));
+    let lc = 0;
+    for (let i = 0; i < pc; i++) labelCandidates[lc++] = primaryCandidates[i];
+    for (let i = 0; i < Math.min(bc, simConfig.backgroundLabelLimit); i++) labelCandidates[lc++] = bgArray[i];
+    labelCandidates.sort((a, b) => b.priority - a.priority);
 
     const acceptedRects = [];
     const padding = 4 / transform.k;
@@ -942,6 +967,7 @@
       k: newK,
     };
     userManipulatedView = true;
+    if (!simRunning) render();
   }
 
   function resetView() {
@@ -960,8 +986,6 @@
     <canvas
       bind:this={canvas}
       onmousedown={onMouseDown}
-      onmousemove={onMouseMove}
-      onmouseup={onMouseUp}
       onclick={onClick}
       onmouseleave={() => {
         if (!isDragging) hoverNode = null;
