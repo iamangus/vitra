@@ -81,6 +81,8 @@
       .d3VelocityDecay(0.3)
       .d3AlphaDecay(0.015);
 
+    graphInstance.d3Force('charge').strength(-80);
+
     if (graphDataObj.nodes.length > 0) {
       graphInstance.graphData(graphDataObj);
     }
