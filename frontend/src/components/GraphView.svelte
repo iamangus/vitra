@@ -38,7 +38,7 @@
     const liveUnsub = subscribeToLiveUpdates((event) => {
       if (!event.graph) return;
       clearTimeout(graphReloadTimeout);
-      graphReloadTimeout = setTimeout(loadGraph, 250);
+      graphReloadTimeout = setTimeout(() => loadGraph(true), 250);
     });
 
     themeUnsub = theme.subscribe(() => {
@@ -69,6 +69,7 @@
       .linkColor(link => getLinkColor(link))
       .linkWidth(1)
       .nodeRelSize(6)
+      .nodeResolution(24)
       .nodeThreeObject(makeLabelSprite)
       .nodeThreeObjectExtend(true)
       .onNodeClick(handleNodeClick)
@@ -272,15 +273,35 @@
     return { nodes: processedNodes, links: processedLinks };
   }
 
-  function updateGraph() {
+  function updateGraph(isLive = false) {
     if (!graphInstance) return;
+
+    if (isLive) {
+      const prevData = graphInstance.graphData();
+      if (prevData && prevData.nodes) {
+        const posMap = new Map();
+        for (const n of prevData.nodes) {
+          if (n.x !== undefined) posMap.set(n.id, { x: n.x, y: n.y, z: n.z });
+        }
+        for (const node of graphDataObj.nodes) {
+          const saved = posMap.get(node.id);
+          if (saved) {
+            node.x = saved.x;
+            node.y = saved.y;
+            node.z = saved.z;
+          }
+        }
+      }
+    }
+
     graphInstance.graphData(graphDataObj);
-    if (graphDataObj.nodes.length > 0) {
+
+    if (!isLive && graphDataObj.nodes.length > 0) {
       setTimeout(() => graphInstance.zoomToFit(400, 40), 200);
     }
   }
 
-  async function loadGraph() {
+  async function loadGraph(isLive = false) {
     error = null;
     try {
       const data = await graph.get();
@@ -295,7 +316,7 @@
       _selectedId = null;
       _hoverId = null;
       if (graphInstance) {
-        updateGraph();
+        updateGraph(isLive);
         refreshRender();
       }
     } catch (e) {
