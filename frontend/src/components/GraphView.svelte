@@ -69,6 +69,7 @@
       .linkColor(link => getLinkColor(link))
       .linkWidth(1)
       .nodeRelSize(6)
+      .nodeResolution(24)
       .nodeThreeObject(makeLabelSprite)
       .nodeThreeObjectExtend(true)
       .onNodeClick(handleNodeClick)
