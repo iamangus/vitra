@@ -1,203 +1,283 @@
 <script>
   import { createEventDispatcher, onMount } from 'svelte';
+  import ForceGraph3D from '3d-force-graph';
+  import * as THREE from 'three';
   import { graph } from '../lib/api.js';
   import { subscribeToLiveUpdates } from '../lib/live.js';
+  import { theme } from '../stores/theme.js';
 
   const dispatch = createEventDispatcher();
 
-  // Canvas refs
-  let canvas = $state(null);
   let container = $state(null);
-
-  // Graph data
-  let nodes = $state([]);
-  let links = $state([]);
   let loading = $state(true);
   let error = $state(null);
-
-  // Viewport + interaction
-  let transform = $state({ x: 0, y: 0, k: 1 });
-  let isDragging = $state(false);
-  let dragNode = $state(null);
-  let hoverNode = $state(null);
   let selectedNodeId = $state(null);
-  let mousePos = { x: 0, y: 0 };
-  let dragWorldPos = $state({ x: 0, y: 0 });
-  let dragStartPos = $state({ x: 0, y: 0 });
-  let movedDuringDrag = $state(false);
-  let suppressClick = $state(false);
-
+  let hoverNodeId = $state(null);
   let showAllLabels = $state(false);
+  let nodeCount = $state(0);
+  let linkCount = $state(0);
+  let hasData = $state(false);
 
-  // Imperative handles (not reactive UI state)
-  let ctx = null;
-  let animationId = null;
-  let resizeObserver = null;
+  let graphInstance = null;
+  let graphDataObj = { nodes: [], links: [] };
+  let _selectedId = null;
+  let cachedSelectedConnected = new Set();
+  let _hoverId = null;
+  let cachedHoverConnected = new Set();
   let graphReloadTimeout = null;
-  let nodeIndexById = new Map();
-  let groupAnchorByKey = new Map();
-  let simConfig = null;
-  let simRunning = false;
-  let dpr = 1;
-  let hasFitted = false;
-  let simulationAlpha = 1;
-  let settledFrameCount = 0;
-  let userManipulatedView = false;
-  let resizeObserverCreated = false;
+  let themeUnsub = null;
+  let labelSprites = null;
+  let isDarkMode = $state(false);
+
+  isDarkMode = isDark();
 
   onMount(() => {
-    dpr = window.devicePixelRatio || 1;
     showAllLabels = localStorage.getItem('graphShowAllLabels') === 'true';
-
     loadGraph();
 
-    const unsubscribe = subscribeToLiveUpdates((event) => {
+    const liveUnsub = subscribeToLiveUpdates((event) => {
       if (!event.graph) return;
       clearTimeout(graphReloadTimeout);
-      graphReloadTimeout = setTimeout(() => {
-        loadGraph();
-      }, 250);
+      graphReloadTimeout = setTimeout(loadGraph, 250);
+    });
+
+    themeUnsub = theme.subscribe(() => {
+      if (graphInstance) updateTheme();
     });
 
     return () => {
       clearTimeout(graphReloadTimeout);
-      if (animationId) cancelAnimationFrame(animationId);
-      if (resizeObserver) resizeObserver.disconnect();
-      unsubscribe();
+      liveUnsub();
+      if (themeUnsub) themeUnsub();
     };
   });
 
-  // Canvas setup (reactive to container/canvas binding)
   $effect(() => {
-    if (!canvas || !container) return;
+    if (!container) return;
+    if (graphInstance) return;
 
-    ctx = canvas.getContext('2d');
-    if (!ctx) return;
+    labelSprites = new Map();
 
-    const rect = container.getBoundingClientRect();
-    const w = Math.max(1, Math.floor(rect.width));
-    const h = Math.max(1, Math.floor(rect.height));
-    const needResize = canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr);
+    graphInstance = ForceGraph3D()(container)
+      .nodeId('id')
+      .linkSource('sourceId')
+      .linkTarget('targetId')
+      .backgroundColor(isDark() ? '#0a0a0c' : '#fafafa')
+      .nodeLabel(node => node.title)
+      .nodeVal(node => node.val || 1)
+      .nodeColor(node => getNodeColor(node))
+      .linkColor(link => getLinkColor(link))
+      .linkWidth(1)
+      .nodeRelSize(6)
+      .nodeThreeObject(makeLabelSprite)
+      .nodeThreeObjectExtend(true)
+      .onNodeClick(handleNodeClick)
+      .onNodeHover(handleNodeHover)
+      .onBackgroundClick(() => { selectedNodeId = null; refreshRender(); })
+      .enableNodeDrag(true)
+      .showNavInfo(false)
+      .warmupTicks(30)
+      .d3VelocityDecay(0.3)
+      .d3AlphaDecay(0.015);
 
-    if (needResize) {
-      resizeCanvas();
+    if (graphDataObj.nodes.length > 0) {
+      graphInstance.graphData(graphDataObj);
     }
-
-    if (resizeObserverCreated) return;
-    resizeObserverCreated = true;
-
-    resizeObserver = new ResizeObserver(() => {
-      resizeCanvas();
-      if (userManipulatedView || nodes.length === 0) return;
-      fitGraphToViewport(0.9);
-    });
-    resizeObserver.observe(container);
   });
 
-  // Window-level mouse events
-  $effect(() => {
-    if (!canvas) return;
+  function isDark() {
+    return document.documentElement.classList.contains('dark');
+  }
 
-    const handleWindowMouseMove = (e) => onMouseMove(e);
-    const handleWindowMouseUp = () => onMouseUp();
+  function getSelectedConnected() {
+    if (selectedNodeId === _selectedId) return cachedSelectedConnected;
+    _selectedId = selectedNodeId;
+    cachedSelectedConnected = new Set();
+    if (!selectedNodeId) return cachedSelectedConnected;
+    cachedSelectedConnected.add(selectedNodeId);
+    for (const link of graphDataObj.links) {
+      if (link.sourceId === selectedNodeId) cachedSelectedConnected.add(link.targetId);
+      else if (link.targetId === selectedNodeId) cachedSelectedConnected.add(link.sourceId);
+    }
+    return cachedSelectedConnected;
+  }
 
-    window.addEventListener('mousemove', handleWindowMouseMove);
-    window.addEventListener('mouseup', handleWindowMouseUp);
+  function getHoverConnected() {
+    if (hoverNodeId === _hoverId) return cachedHoverConnected;
+    _hoverId = hoverNodeId;
+    cachedHoverConnected = new Set();
+    if (!hoverNodeId) return cachedHoverConnected;
+    cachedHoverConnected.add(hoverNodeId);
+    for (const link of graphDataObj.links) {
+      if (link.sourceId === hoverNodeId) cachedHoverConnected.add(link.targetId);
+      else if (link.targetId === hoverNodeId) cachedHoverConnected.add(link.sourceId);
+    }
+    return cachedHoverConnected;
+  }
 
-    return () => {
-      window.removeEventListener('mousemove', handleWindowMouseMove);
-      window.removeEventListener('mouseup', handleWindowMouseUp);
-    };
-  });
+  function getNodeColor(node) {
+    const dark = isDark();
+    const selConn = getSelectedConnected();
+    const hovConn = getHoverConnected();
+    if (node.id === selectedNodeId) return dark ? '#c084fc' : '#6d28d9';
+    if (node.id === hoverNodeId) return dark ? '#c084fc' : '#6d28d9';
+    if (selConn.has(node.id)) return dark ? '#a855f7' : '#7c3aed';
+    if (hovConn.has(node.id)) return dark ? '#a855f7' : '#7c3aed';
+    if (selectedNodeId) return dark ? 'rgba(168, 85, 247, 0.28)' : 'rgba(124, 58, 237, 0.28)';
+    return dark ? 'rgba(168, 85, 247, 0.82)' : 'rgba(124, 58, 237, 0.82)';
+  }
+
+  function getLinkColor(link) {
+    const dark = isDark();
+    const selConn = getSelectedConnected();
+    const hovConn = getHoverConnected();
+    const touchesHover = hovConn.has(link.sourceId) && hovConn.has(link.targetId);
+    const touchesSelection = selConn.has(link.sourceId) && selConn.has(link.targetId);
+    if (touchesHover) return dark ? 'rgba(192, 132, 252, 0.78)' : 'rgba(109, 40, 217, 0.75)';
+    if (touchesSelection) return dark ? 'rgba(168, 85, 247, 0.6)' : 'rgba(124, 58, 237, 0.6)';
+    if (selectedNodeId) return dark ? 'rgba(139, 139, 152, 0.06)' : 'rgba(161, 161, 171, 0.08)';
+    return dark ? 'rgba(139, 139, 152, 0.25)' : 'rgba(161, 161, 171, 0.28)';
+  }
+
+  function makeLabelSprite(node) {
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    const text = node.title || '';
+    const fontSize = 128;
+    ctx.font = `bold ${fontSize}px -apple-system, system-ui, sans-serif`;
+    const metrics = ctx.measureText(text);
+    const padding = fontSize * 0.3;
+    canvas.width = metrics.width + padding * 2;
+    canvas.height = fontSize * 1.5;
+
+    const dark = isDarkMode;
+    ctx.font = `bold ${fontSize}px -apple-system, system-ui, sans-serif`;
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = dark ? 'rgba(212, 180, 252, 0.92)' : 'rgba(76, 29, 149, 0.88)';
+    ctx.fillText(text, padding, canvas.height / 2);
+
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.minFilter = THREE.LinearFilter;
+    texture.generateMipmaps = false;
+    const material = new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false, depthWrite: false });
+    const sprite = new THREE.Sprite(material);
+    const aspect = canvas.width / canvas.height;
+    const labelHeight = 10;
+    sprite.scale.set(labelHeight * aspect, labelHeight, 1);
+    const radius = Math.cbrt((node.val || 1) * 6);
+    sprite.position.set(0, radius + 4, 0);
+    sprite.renderOrder = 999;
+    sprite.visible = false;
+    labelSprites.set(node.id, sprite);
+    return sprite;
+  }
+
+  function shouldShowLabel(id) {
+    if (showAllLabels) return true;
+    if (id === selectedNodeId || id === hoverNodeId) return true;
+    const selConn = getSelectedConnected();
+    const hovConn = getHoverConnected();
+    if (selConn.has(id) || hovConn.has(id)) return true;
+    return false;
+  }
+
+  function refreshRender() {
+    if (!graphInstance) return;
+    graphInstance.nodeColor(node => getNodeColor(node));
+    graphInstance.linkColor(link => getLinkColor(link));
+    if (labelSprites) {
+      for (const [id, sprite] of labelSprites) {
+        sprite.visible = shouldShowLabel(id);
+      }
+    }
+  }
+
+  function handleNodeClick(node, event) {
+    if (!node) {
+      selectedNodeId = null;
+      refreshRender();
+      return;
+    }
+    if (selectedNodeId === node.id) {
+      dispatch('navigate', node.id);
+      return;
+    }
+    selectedNodeId = node.id;
+    refreshRender();
+  }
+
+  function handleNodeHover(node) {
+    hoverNodeId = node ? node.id : null;
+    refreshRender();
+  }
+
+  function updateTheme() {
+    if (!graphInstance) return;
+    isDarkMode = isDark();
+    graphInstance.backgroundColor(isDarkMode ? '#0a0a0c' : '#fafafa');
+    labelSprites = new Map();
+    if (graphDataObj.nodes.length > 0) {
+      graphInstance.graphData(graphDataObj);
+      setTimeout(() => refreshRender(), 100);
+    } else {
+      graphInstance.refresh();
+    }
+  }
+
+  function resetView() {
+    if (!graphInstance) return;
+    graphInstance.zoomToFit(400, 35);
+  }
 
   function toggleAllLabels() {
     showAllLabels = !showAllLabels;
     localStorage.setItem('graphShowAllLabels', showAllLabels ? 'true' : 'false');
-  }
-
-  function clamp(value, min, max) {
-    return Math.max(min, Math.min(max, value));
-  }
-
-  function getSettleSpeedThreshold() {
-    return Math.max(0.035, 0.14 - Math.sqrt(nodes.length || 1) * 0.01);
-  }
-
-  function startSimulationLoop() {
-    if (simRunning) return;
-    simRunning = true;
-
-    let lastTime = performance.now();
-
-    function tick(now) {
-      const dt = Math.min((now - lastTime) / 16.67, 3);
-      lastTime = now;
-
-      if (nodes.length > 0) {
-
-        if (!hasFitted && !userManipulatedView) {
-          fitGraphToViewport(0.9);
-          hasFitted = true;
-        }
-
-        const maxNodeSpeed = simulate(dt);
-        const minAlpha = dragNode ? 0.28 : 0.12;
-        const decay = dragNode ? 0.992 : 0.972;
-        simulationAlpha = Math.max(minAlpha, simulationAlpha * decay);
-
-        if (dragNode) {
-          settledFrameCount = 0;
-        } else if (maxNodeSpeed < getSettleSpeedThreshold()) {
-          settledFrameCount += 1;
-        } else {
-          settledFrameCount = 0;
-        }
+    if (labelSprites) {
+      for (const [id, sprite] of labelSprites) {
+        sprite.visible = shouldShowLabel(id);
       }
+    }
+  }
 
-      render();
-
-      if (!dragNode && !isDragging && settledFrameCount >= 18) {
-        simRunning = false;
-        animationId = null;
-        return;
+  function preprocessData(data) {
+    const maxLinks = Math.max(1, ...data.nodes.map(n => {
+      let count = 0;
+      for (const link of data.links) {
+        if (link.source === n.id || link.target === n.id) count++;
       }
+      return count;
+    }));
 
-      animationId = requestAnimationFrame(tick);
-    }
+    const processedNodes = data.nodes.map(n => {
+      let links = 0;
+      for (const link of data.links) {
+        if (link.source === n.id || link.target === n.id) links++;
+      }
+      const linkRatio = links / maxLinks;
+      return {
+        id: n.id,
+        title: n.title,
+        val: 1 + Math.pow(linkRatio, 1.7) * 6,
+      };
+    });
 
-    animationId = requestAnimationFrame(tick);
+    const validIds = new Set(processedNodes.map(n => n.id));
+    const processedLinks = data.links
+      .filter(l => validIds.has(l.source) && validIds.has(l.target))
+      .map(l => ({
+        sourceId: l.source,
+        targetId: l.target,
+      }));
+
+    return { nodes: processedNodes, links: processedLinks };
   }
 
-  function hashString(value) {
-    let hash = 0;
-    for (let i = 0; i < value.length; i++) {
-      hash = (hash * 31 + value.charCodeAt(i)) >>> 0;
+  function updateGraph() {
+    if (!graphInstance) return;
+    graphInstance.graphData(graphDataObj);
+    if (graphDataObj.nodes.length > 0) {
+      setTimeout(() => graphInstance.zoomToFit(400, 40), 200);
     }
-    return hash;
-  }
-
-  function deriveGroupKey(nodeId) {
-    const parts = nodeId.split('/').filter(Boolean);
-    if (parts.length <= 1) return nodeId;
-    return parts.slice(0, Math.min(2, parts.length)).join('/');
-  }
-
-  function resizeCanvas() {
-    if (!canvas || !container || !ctx) return;
-    const rect = container.getBoundingClientRect();
-    const w = Math.max(1, Math.floor(rect.width));
-    const h = Math.max(1, Math.floor(rect.height));
-    const targetW = Math.round(w * dpr);
-    const targetH = Math.round(h * dpr);
-
-    if (canvas.width !== targetW || canvas.height !== targetH) {
-      canvas.width = targetW;
-      canvas.height = targetH;
-    }
-    canvas.style.width = w + 'px';
-    canvas.style.height = h + 'px';
-
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   }
 
   async function loadGraph() {
@@ -207,773 +287,22 @@
       if (!data || !Array.isArray(data.nodes)) {
         throw new Error('Invalid graph data');
       }
-
-      initGraph({
-        nodes: data.nodes,
-        links: Array.isArray(data.links) ? data.links : [],
-      });
+      const processed = preprocessData(data);
+      graphDataObj = processed;
+      nodeCount = processed.nodes.length;
+      linkCount = processed.links.length;
+      hasData = processed.nodes.length > 0;
+      _selectedId = null;
+      _hoverId = null;
+      if (graphInstance) {
+        updateGraph();
+        refreshRender();
+      }
     } catch (e) {
       error = e.message;
     } finally {
       loading = false;
     }
-  }
-
-  function buildSimConfig(nodeCount, linkCount) {
-    const safeNodeCount = Math.max(1, nodeCount);
-    const avgDegree = nodeCount > 0 ? (2 * linkCount) / nodeCount : 0;
-    const maxPossibleLinks = nodeCount > 1 ? (nodeCount * (nodeCount - 1)) / 2 : 1;
-    const density = linkCount / Math.max(1, maxPossibleLinks);
-
-    return {
-      repulsion: 4200 + safeNodeCount * 180 + density * 18000,
-      springLength: 180 + Math.sqrt(safeNodeCount) * 18 + avgDegree * 12,
-      springStrength: clamp(0.09 - density * 0.08, 0.015, 0.08),
-      damping: clamp(0.91 - density * 0.05, 0.84, 0.92),
-      centerForce: clamp(0.006 - safeNodeCount * 0.00003 - density * 0.002, 0.0012, 0.0045),
-      maxSpeed: clamp(6 + Math.sqrt(safeNodeCount) * 0.36, 6, 14),
-      maxJerk: 1.5,
-      fitPadding: Math.round(135 + Math.sqrt(safeNodeCount) * 20 + avgDegree * 8),
-      labelZoomThreshold: safeNodeCount > 60 ? 1.1 : 0.9,
-      detailZoomThreshold: safeNodeCount > 60 ? 1.55 : 1.25,
-      backgroundLabelLimit: Math.round(clamp(Math.sqrt(safeNodeCount) * 1.5, 8, 20)),
-      idleLabelDegreeThreshold: Math.max(4, Math.ceil(avgDegree)),
-      edgeOpacity: clamp(0.28 - density * 0.1, 0.1, 0.28),
-      collisionStrength: clamp(0.16 + density * 0.35 + safeNodeCount * 0.0006, 0.16, 0.28),
-      hubSpacingScale: clamp(2.5 + density * 5 + avgDegree * 0.08, 2.5, 5.5),
-      groupForce: clamp(0.003 + density * 0.024 + avgDegree * 0.00018, 0.003, 0.011),
-      groupOrbitRadius: Math.round(290 + Math.sqrt(safeNodeCount) * 38 + avgDegree * 11),
-      crossGroupSpringScale: clamp(1.35 + density * 1.5, 1.35, 1.9),
-      crossGroupSpringStrengthScale: clamp(0.7 - density * 0.3, 0.45, 0.7),
-    };
-  }
-
-  function buildGroupAnchors(newNodes, nextConfig) {
-    const groups = new Map();
-    for (const node of newNodes) {
-      if (!groups.has(node.groupKey)) {
-        groups.set(node.groupKey, []);
-      }
-      groups.get(node.groupKey).push(node);
-    }
-
-    const orderedGroups = [...groups.entries()].sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]));
-    const anchors = new Map();
-
-    orderedGroups.forEach(([groupKey], index) => {
-      const angle = orderedGroups.length === 1 ? 0 : (index / orderedGroups.length) * Math.PI * 2;
-      const radiusJitter = orderedGroups.length <= 2 ? 0 : (index % 3) * nextConfig.springLength * 0.18;
-      const orbitRadius = orderedGroups.length === 1 ? 0 : nextConfig.groupOrbitRadius + radiusJitter;
-      anchors.set(groupKey, {
-        x: Math.cos(angle) * orbitRadius,
-        y: Math.sin(angle) * orbitRadius,
-      });
-    });
-
-    return anchors;
-  }
-
-  function seedNodePositions(newNodes, nextConfig, anchors) {
-    const groups = new Map();
-    for (const node of newNodes) {
-      if (!groups.has(node.groupKey)) {
-        groups.set(node.groupKey, []);
-      }
-      groups.get(node.groupKey).push(node);
-    }
-
-    const orderedGroups = [...groups.entries()].sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]));
-    for (const [groupKey, groupNodes] of orderedGroups) {
-      const anchor = anchors.get(groupKey) || { x: 0, y: 0 };
-      const orderedNodes = [...groupNodes].sort((a, b) => b.links - a.links || a.id.localeCompare(b.id));
-      const baseSpacing = 42 + Math.sqrt(groupNodes.length) * 13 + nextConfig.springLength * 0.06;
-      let ring = 0;
-      let indexInRing = 0;
-      let ringCapacity = Math.max(1, Math.ceil(Math.sqrt(groupNodes.length) * 1.8));
-
-      for (const node of orderedNodes) {
-        if (indexInRing >= ringCapacity) {
-          ring += 1;
-          indexInRing = 0;
-          ringCapacity = Math.max(6, Math.round(Math.sqrt(groupNodes.length) * (ring + 1) * 1.5));
-        }
-
-        const angle = ringCapacity === 1
-          ? 0
-          : (indexInRing / ringCapacity) * Math.PI * 2 + ring * 0.35 + (hashString(groupKey) % 7) * 0.09;
-        const ringRadius = ring * baseSpacing;
-        const jitterSeed = hashString(node.id);
-        const jitter = Math.min(18, 6 + ring * 2);
-        const jitterX = ((((jitterSeed & 1023) / 1023) * 2) - 1) * jitter;
-        const jitterY = (((((jitterSeed >> 10) & 1023) / 1023) * 2) - 1) * jitter;
-
-        node.x = anchor.x + Math.cos(angle) * ringRadius + jitterX;
-        node.y = anchor.y + Math.sin(angle) * ringRadius + jitterY;
-        node.vx = 0;
-        node.vy = 0;
-
-        indexInRing += 1;
-      }
-    }
-  }
-
-  function positionNewNodes(newNodes, anchors) {
-    const existingNodesByGroup = new Map();
-
-    for (const node of newNodes) {
-      if (node.isNew) continue;
-      if (!existingNodesByGroup.has(node.groupKey)) {
-        existingNodesByGroup.set(node.groupKey, []);
-      }
-      existingNodesByGroup.get(node.groupKey).push(node);
-    }
-
-    for (const node of newNodes) {
-      if (!node.isNew) continue;
-
-      const neighbors = existingNodesByGroup.get(node.groupKey) || [];
-      const seed = hashString(node.id);
-      const angle = ((seed % 360) / 360) * Math.PI * 2;
-      const offset = 44 + (seed % 36);
-
-      if (neighbors.length > 0) {
-        const centroid = neighbors.reduce((acc, neighbor) => {
-          acc.x += neighbor.x;
-          acc.y += neighbor.y;
-          return acc;
-        }, { x: 0, y: 0 });
-
-        node.x = centroid.x / neighbors.length + Math.cos(angle) * offset;
-        node.y = centroid.y / neighbors.length + Math.sin(angle) * offset;
-      } else {
-        const anchor = anchors.get(node.groupKey) || { x: 0, y: 0 };
-        node.x = anchor.x + Math.cos(angle) * offset;
-        node.y = anchor.y + Math.sin(angle) * offset;
-      }
-
-      node.vx = 0;
-      node.vy = 0;
-    }
-  }
-
-  function initGraph(data) {
-    const existingNodesById = new Map(nodes.map((node) => [node.id, node]));
-    const hadLayout = existingNodesById.size > 0;
-    const previousSelectedNodeId = selectedNodeId;
-    const previousHoverNodeId = hoverNode?.id || null;
-    const nextNodeIndexById = new Map();
-    const newNodes = data.nodes.map((n) => ({
-      id: n.id,
-      title: n.title,
-      groupKey: deriveGroupKey(n.id),
-      x: existingNodesById.get(n.id)?.x ?? 0,
-      y: existingNodesById.get(n.id)?.y ?? 0,
-      vx: existingNodesById.get(n.id)?.vx ?? 0,
-      vy: existingNodesById.get(n.id)?.vy ?? 0,
-      prevVX: existingNodesById.get(n.id)?.prevVX,
-      prevVY: existingNodesById.get(n.id)?.prevVY,
-      radius: 4,
-      links: 0,
-      isNew: !existingNodesById.has(n.id),
-    }));
-
-    for (const node of newNodes) {
-      nextNodeIndexById.set(node.id, nextNodeIndexById.size);
-    }
-
-    const newLinks = data.links
-      .filter((link) => nextNodeIndexById.has(link.source) && nextNodeIndexById.has(link.target))
-      .map((link) => ({
-        sourceId: link.source,
-        targetId: link.target,
-      }));
-
-    for (const link of newLinks) {
-      const source = newNodes[nextNodeIndexById.get(link.sourceId)];
-      const target = newNodes[nextNodeIndexById.get(link.targetId)];
-      if (source) source.links += 1;
-      if (target) target.links += 1;
-    }
-
-    const maxLinks = Math.max(1, ...newNodes.map((node) => node.links));
-    for (const node of newNodes) {
-      const linkRatio = node.links / maxLinks;
-      node.radius = 16 + Math.pow(linkRatio, 1.7) * 13;
-    }
-
-    const nextConfig = buildSimConfig(newNodes.length, newLinks.length);
-    const nextGroupAnchors = buildGroupAnchors(newNodes, nextConfig);
-    if (hadLayout) {
-      positionNewNodes(newNodes, nextGroupAnchors);
-    } else {
-      seedNodePositions(newNodes, nextConfig, nextGroupAnchors);
-    }
-
-    nodes = newNodes;
-    links = newLinks;
-    nodeIndexById = nextNodeIndexById;
-    groupAnchorByKey = nextGroupAnchors;
-    simConfig = nextConfig;
-
-    if (previousSelectedNodeId && nextNodeIndexById.has(previousSelectedNodeId)) {
-      selectedNodeId = previousSelectedNodeId;
-    } else {
-      selectedNodeId = null;
-    }
-
-    if (previousHoverNodeId && nextNodeIndexById.has(previousHoverNodeId)) {
-      hoverNode = newNodes[nextNodeIndexById.get(previousHoverNodeId)];
-    } else {
-      hoverNode = null;
-    }
-
-    // Start or restart simulation
-    if (animationId) cancelAnimationFrame(animationId);
-    animationId = null;
-    hasFitted = hadLayout;
-    if (!hadLayout) userManipulatedView = false;
-    simulationAlpha = 1;
-    settledFrameCount = 0;
-    simRunning = false;
-
-    if (newNodes.length > 0) {
-      startSimulationLoop();
-    } else {
-      render();
-    }
-  }
-
-  function getBounds(padding) {
-    if (padding === undefined) padding = simConfig.fitPadding;
-    let minX = Infinity;
-    let maxX = -Infinity;
-    let minY = Infinity;
-    let maxY = -Infinity;
-
-    for (const node of nodes) {
-      minX = Math.min(minX, node.x - node.radius);
-      maxX = Math.max(maxX, node.x + node.radius);
-      minY = Math.min(minY, node.y - node.radius);
-      maxY = Math.max(maxY, node.y + node.radius);
-    }
-
-    return {
-      minX: minX - padding,
-      maxX: maxX + padding,
-      minY: minY - padding,
-      maxY: maxY + padding,
-    };
-  }
-
-  function fitGraphToViewport(fill = 0.9) {
-    if (nodes.length === 0 || !canvas) return;
-
-    const bounds = getBounds();
-    const rect = canvas.getBoundingClientRect();
-    const graphW = Math.max(1, bounds.maxX - bounds.minX);
-    const graphH = Math.max(1, bounds.maxY - bounds.minY);
-    const scale = Math.min(rect.width / graphW, rect.height / graphH, 2);
-    const k = Math.max(0.08, scale * fill);
-    const centerX = (bounds.minX + bounds.maxX) / 2;
-    const centerY = (bounds.minY + bounds.maxY) / 2;
-
-    transform = {
-      k,
-      x: rect.width / 2 - centerX * k,
-      y: rect.height / 2 - centerY * k,
-    };
-  }
-
-  function simulate(dt) {
-    const cx = 0;
-    const cy = 0;
-    const forceScale = Math.max(0.12, simulationAlpha);
-    const damping = clamp(simConfig.damping + (1 - forceScale) * 0.045, 0.84, 0.97);
-    const maxSpeed = Math.max(0.9, simConfig.maxSpeed * (0.45 + forceScale * 0.55));
-    let maxNodeSpeed = 0;
-
-    for (let i = 0; i < nodes.length; i++) {
-      for (let j = i + 1; j < nodes.length; j++) {
-        const a = nodes[i];
-        const b = nodes[j];
-        let dx = a.x - b.x;
-        let dy = a.y - b.y;
-        let dist = Math.sqrt(dx * dx + dy * dy) || 1;
-        const sameGroup = a.groupKey === b.groupKey;
-        const repulsionMultiplier = sameGroup ? 0.82 : 1.35;
-        const force = (simConfig.repulsion * repulsionMultiplier * forceScale * dt) / (dist * dist);
-        const fx = (dx / dist) * force;
-        const fy = (dy / dist) * force;
-        a.vx += fx;
-        a.vy += fy;
-        b.vx -= fx;
-        b.vy -= fy;
-
-        const minDistance = a.radius + b.radius + 18
-          + Math.sqrt(a.links) * simConfig.hubSpacingScale
-          + Math.sqrt(b.links) * simConfig.hubSpacingScale
-          + (sameGroup ? 0 : 24);
-        if (dist < minDistance) {
-          const overlap = minDistance - dist;
-          const collisionForce = overlap * simConfig.collisionStrength * forceScale * dt;
-          const cfx = (dx / dist) * collisionForce;
-          const cfy = (dy / dist) * collisionForce;
-          a.vx += cfx;
-          a.vy += cfy;
-          b.vx -= cfx;
-          b.vy -= cfy;
-        }
-      }
-    }
-
-    for (const link of links) {
-      const a = nodes[nodeIndexById.get(link.sourceId)];
-      const b = nodes[nodeIndexById.get(link.targetId)];
-      if (!a || !b) continue;
-      const sameGroup = a.groupKey === b.groupKey;
-      let dx = b.x - a.x;
-      let dy = b.y - a.y;
-      let dist = Math.sqrt(dx * dx + dy * dy) || 1;
-      const targetLength = simConfig.springLength * (sameGroup ? 1 : simConfig.crossGroupSpringScale);
-      const springStrength = simConfig.springStrength * (sameGroup ? 1 : simConfig.crossGroupSpringStrengthScale);
-      const force = (dist - targetLength) * springStrength * forceScale * dt;
-      const fx = (dx / dist) * force;
-      const fy = (dy / dist) * force;
-      a.vx += fx;
-      a.vy += fy;
-      b.vx -= fx;
-      b.vy -= fy;
-    }
-
-    for (const node of nodes) {
-      if (dragNode && node.id === dragNode.id) {
-        node.x = dragWorldPos.x;
-        node.y = dragWorldPos.y;
-        node.vx = 0;
-        node.vy = 0;
-        continue;
-      }
-
-      const anchor = groupAnchorByKey.get(node.groupKey);
-      if (anchor) {
-        node.vx += (anchor.x - node.x) * simConfig.groupForce * forceScale * dt;
-        node.vy += (anchor.y - node.y) * simConfig.groupForce * forceScale * dt;
-      }
-
-      node.vx += (cx - node.x) * simConfig.centerForce * forceScale * dt;
-      node.vy += (cy - node.y) * simConfig.centerForce * forceScale * dt;
-
-      node.vx *= damping;
-      node.vy *= damping;
-
-      const speed = Math.sqrt(node.vx * node.vx + node.vy * node.vy);
-      if (speed > maxSpeed) {
-        node.vx = (node.vx / speed) * maxSpeed;
-        node.vy = (node.vy / speed) * maxSpeed;
-      }
-
-      const jerkLimit = dragNode ? Infinity : simConfig.maxJerk;
-      if (node.prevVX !== undefined) {
-        const dVx = node.vx - node.prevVX;
-        const dVy = node.vy - node.prevVY;
-        const dV = Math.sqrt(dVx * dVx + dVy * dVy);
-        if (dV > jerkLimit) {
-          node.vx = node.prevVX + (dVx / dV) * jerkLimit;
-          node.vy = node.prevVY + (dVy / dV) * jerkLimit;
-        }
-      }
-      node.prevVX = node.vx;
-      node.prevVY = node.vy;
-
-      maxNodeSpeed = Math.max(maxNodeSpeed, Math.sqrt(node.vx * node.vx + node.vy * node.vy));
-
-      node.x += node.vx * dt;
-      node.y += node.vy * dt;
-    }
-
-    return maxNodeSpeed;
-  }
-
-  function getConnectedIds(focusId) {
-    const connectedIds = new Set();
-    if (!focusId) return connectedIds;
-
-    connectedIds.add(focusId);
-    for (const link of links) {
-      if (link.sourceId === focusId) {
-        connectedIds.add(link.targetId);
-      } else if (link.targetId === focusId) {
-        connectedIds.add(link.sourceId);
-      }
-    }
-    return connectedIds;
-  }
-
-
-  function getVisibleWorldRect(width, height) {
-    return {
-      minX: (-transform.x) / transform.k,
-      maxX: (width - transform.x) / transform.k,
-      minY: (-transform.y) / transform.k,
-      maxY: (height - transform.y) / transform.k,
-    };
-  }
-
-  function isNodeVisible(node, rect) {
-    return node.x + node.radius >= rect.minX
-      && node.x - node.radius <= rect.maxX
-      && node.y + node.radius >= rect.minY
-      && node.y - node.radius <= rect.maxY;
-  }
-
-  function rectsOverlap(a, b) {
-    return a.x < b.x + b.w
-      && a.x + a.w > b.x
-      && a.y < b.y + b.h
-      && a.y + a.h > b.y;
-  }
-
-  function render() {
-    if (!ctx || !canvas) return;
-
-    const rect = canvas.getBoundingClientRect();
-    const width = rect.width;
-    const height = rect.height;
-    const isDark = document.documentElement.classList.contains('dark');
-
-    ctx.fillStyle = isDark ? '#0a0a0c' : '#fafafa';
-    ctx.fillRect(0, 0, width, height);
-
-    ctx.save();
-    ctx.translate(transform.x, transform.y);
-    ctx.scale(transform.k, transform.k);
-
-    const selectedConnectedIds = getConnectedIds(selectedNodeId);
-    const hoverConnectedIds = getConnectedIds(hoverNode?.id || '');
-    const hasSelection = selectedConnectedIds.size > 0;
-    const visibleWorld = getVisibleWorldRect(width, height);
-    const baseLinkAlpha = simConfig.edgeOpacity;
-
-    const defaultLinkColor = isDark
-      ? `rgba(139, 139, 152, ${baseLinkAlpha})`
-      : `rgba(161, 161, 171, ${baseLinkAlpha})`;
-    const crossGroupLinkColor = isDark
-      ? `rgba(139, 139, 152, ${baseLinkAlpha * 0.55})`
-      : `rgba(161, 161, 171, ${baseLinkAlpha * 0.55})`;
-    const dimLinkColor = isDark ? 'rgba(139, 139, 152, 0.05)' : 'rgba(161, 161, 171, 0.08)';
-    const nodeColor = isDark ? '#a855f7' : '#7c3aed';
-    const hoverColor = isDark ? '#c084fc' : '#6d28d9';
-    const dimNodeColor = isDark ? 'rgba(168, 85, 247, 0.2)' : 'rgba(124, 58, 237, 0.2)';
-    const textColor = isDark ? 'rgba(240, 240, 245, 0.92)' : 'rgba(26, 26, 30, 0.92)';
-    const mutedTextColor = isDark ? 'rgba(240, 240, 245, 0.78)' : 'rgba(26, 26, 30, 0.78)';
-
-    const hoverLinkColor = isDark ? 'rgba(192, 132, 252, 0.78)' : 'rgba(109, 40, 217, 0.75)';
-    const selectionLinkColor = isDark ? 'rgba(168, 85, 247, 0.68)' : 'rgba(124, 58, 237, 0.68)';
-    const defaultFillColor = isDark ? 'rgba(168, 85, 247, 0.82)' : 'rgba(124, 58, 237, 0.82)';
-    const selectedOutlineColor = isDark ? 'rgba(168, 85, 247, 0.55)' : 'rgba(124, 58, 237, 0.55)';
-    const hoverOutlineColor = isDark ? 'rgba(192, 132, 252, 0.65)' : 'rgba(109, 40, 217, 0.65)';
-
-    for (const link of links) {
-      const source = nodes[nodeIndexById.get(link.sourceId)];
-      const target = nodes[nodeIndexById.get(link.targetId)];
-      if (!source || !target) continue;
-      const sameGroup = source.groupKey === target.groupKey;
-
-      const touchesSelection = selectedNodeId && (link.sourceId === selectedNodeId || link.targetId === selectedNodeId);
-      const touchesHover = hoverNode && (link.sourceId === hoverNode.id || link.targetId === hoverNode.id);
-
-      ctx.beginPath();
-      ctx.moveTo(source.x, source.y);
-      ctx.lineTo(target.x, target.y);
-      ctx.strokeStyle = touchesHover
-        ? hoverLinkColor
-        : (touchesSelection
-          ? selectionLinkColor
-          : (hasSelection ? dimLinkColor : (sameGroup ? defaultLinkColor : crossGroupLinkColor)));
-      ctx.lineWidth = touchesHover ? 1.8 : (touchesSelection ? 1.5 : 1);
-      ctx.stroke();
-    }
-
-    for (const node of nodes) {
-      const isSelected = node.id === selectedNodeId;
-      const isHover = node.id === hoverNode?.id;
-      const linkedToSelection = selectedConnectedIds.has(node.id);
-      const linkedToHover = hoverConnectedIds.has(node.id);
-      const dimmed = hasSelection && !linkedToSelection;
-
-      ctx.beginPath();
-      ctx.arc(node.x, node.y, node.radius, 0, Math.PI * 2);
-      ctx.fillStyle = isHover
-        ? hoverColor
-        : (isSelected || linkedToSelection || linkedToHover ? nodeColor : (dimmed ? dimNodeColor : defaultFillColor));
-      ctx.fill();
-
-      if (isSelected || isHover || linkedToSelection) {
-        ctx.beginPath();
-        ctx.arc(node.x, node.y, node.radius + 3, 0, Math.PI * 2);
-        ctx.strokeStyle = isHover
-          ? hoverOutlineColor
-          : selectedOutlineColor;
-        ctx.lineWidth = isSelected ? 1.6 : 1;
-        ctx.stroke();
-      }
-    }
-
-    ctx.font = `${12 / transform.k}px -apple-system, BlinkMacSystemFont, sans-serif`;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-
-    const primaryCandidates = new Array(nodes.length);
-    let pc = 0;
-    const backgroundCandidates = new Array(nodes.length);
-    let bc = 0;
-
-    for (const node of nodes) {
-      if (!isNodeVisible(node, visibleWorld)) continue;
-
-      const isSelected = node.id === selectedNodeId;
-      const isHover = node.id === hoverNode?.id;
-      const linkedToSelection = selectedConnectedIds.has(node.id) && !isSelected;
-      const linkedToHover = hoverConnectedIds.has(node.id) && !isHover;
-
-      if (showAllLabels) {
-        const priority = isHover
-          ? 1000
-          : isSelected
-            ? 900
-            : linkedToHover
-              ? 800
-              : linkedToSelection
-                ? 700
-                : 500;
-        primaryCandidates[pc++] = {
-          node,
-          priority: priority + node.links,
-          force: true,
-          textColor: isHover || isSelected || linkedToHover || linkedToSelection ? textColor : mutedTextColor,
-          background: true,
-        };
-        continue;
-      }
-
-      if (isHover) {
-        primaryCandidates[pc++] = { node, priority: 1000, force: true, textColor, background: true };
-        continue;
-      }
-
-      if (isSelected) {
-        primaryCandidates[pc++] = { node, priority: 900, force: true, textColor, background: true };
-        continue;
-      }
-
-      if (transform.k >= simConfig.labelZoomThreshold && linkedToSelection) {
-        primaryCandidates[pc++] = { node, priority: 700 + node.links, force: false, textColor, background: true };
-        continue;
-      }
-
-      if (linkedToHover) {
-        primaryCandidates[pc++] = { node, priority: 800 + node.links, force: true, textColor, background: true };
-        continue;
-      }
-
-      if (transform.k >= simConfig.detailZoomThreshold && node.links >= simConfig.idleLabelDegreeThreshold) {
-        backgroundCandidates[bc++] = { node, priority: 400 + node.links, force: false, textColor: mutedTextColor, background: true };
-      }
-    }
-
-    const bgArray = new Array(bc);
-    for (let i = 0; i < bc; i++) bgArray[i] = backgroundCandidates[i];
-    bgArray.sort((a, b) => b.priority - a.priority);
-    primaryCandidates.length = pc;
-    const labelCandidates = new Array(pc + Math.min(bc, simConfig.backgroundLabelLimit));
-    let lc = 0;
-    for (let i = 0; i < pc; i++) labelCandidates[lc++] = primaryCandidates[i];
-    for (let i = 0; i < Math.min(bc, simConfig.backgroundLabelLimit); i++) labelCandidates[lc++] = bgArray[i];
-    labelCandidates.sort((a, b) => b.priority - a.priority);
-
-    const acceptedRects = [];
-    const padding = 4 / transform.k;
-    const textHeight = 14 / transform.k;
-
-    for (const candidate of labelCandidates) {
-      const textY = candidate.node.y - candidate.node.radius - 12 / transform.k;
-      const textWidth = ctx.measureText(candidate.node.title).width;
-      const labelRect = {
-        x: candidate.node.x - textWidth / 2 - padding,
-        y: textY - textHeight / 2 - padding,
-        w: textWidth + padding * 2,
-        h: textHeight + padding * 2,
-      };
-
-      if (!showAllLabels && !candidate.force && acceptedRects.some((rect) => rectsOverlap(rect, labelRect))) {
-        continue;
-      }
-
-      acceptedRects.push(labelRect);
-      ctx.fillStyle = isDark ? 'rgba(10, 10, 12, 0.86)' : 'rgba(250, 250, 250, 0.9)';
-      ctx.beginPath();
-      ctx.roundRect(labelRect.x, labelRect.y, labelRect.w, labelRect.h, 3 / transform.k);
-      ctx.fill();
-
-      ctx.fillStyle = candidate.textColor;
-      ctx.fillText(candidate.node.title, candidate.node.x, textY);
-    }
-
-    ctx.restore();
-  }
-
-  function getWorldPos(clientX, clientY) {
-    const rect = canvas.getBoundingClientRect();
-    return {
-      x: (clientX - rect.left - transform.x) / transform.k,
-      y: (clientY - rect.top - transform.y) / transform.k,
-    };
-  }
-
-  function findNodeAt(worldX, worldY) {
-    for (let i = nodes.length - 1; i >= 0; i--) {
-      const node = nodes[i];
-      const dx = worldX - node.x;
-      const dy = worldY - node.y;
-      const hitRadius = Math.max(node.radius + 6, 10);
-      if (dx * dx + dy * dy < hitRadius * hitRadius) {
-        return node;
-      }
-    }
-    return null;
-  }
-
-  function clearInteractionState() {
-    dragNode = null;
-    dragWorldPos = { x: 0, y: 0 };
-    isDragging = false;
-    hoverNode = null;
-    movedDuringDrag = false;
-    if (canvas) {
-      canvas.style.cursor = 'grab';
-    }
-  }
-
-  function onMouseDown(e) {
-    e.preventDefault();
-    const pos = getWorldPos(e.clientX, e.clientY);
-    const node = findNodeAt(pos.x, pos.y);
-
-    if (nodes.length > 0) {
-      simRunning = false;
-      if (animationId) { cancelAnimationFrame(animationId); animationId = null; }
-      simulationAlpha = Math.max(simulationAlpha, 0.45);
-      settledFrameCount = 0;
-      startSimulationLoop();
-    }
-
-    if (node) {
-      dragNode = node;
-      isDragging = true;
-      dragWorldPos = { x: node.x, y: node.y };
-      dragNode.vx = 0;
-      dragNode.vy = 0;
-    } else {
-      dragNode = null;
-      dragWorldPos = { x: 0, y: 0 };
-      isDragging = true;
-    }
-
-    mousePos = { x: e.clientX, y: e.clientY };
-    dragStartPos = { x: e.clientX, y: e.clientY };
-    movedDuringDrag = false;
-  }
-
-  function onMouseMove(e) {
-    const dx = e.clientX - mousePos.x;
-    const dy = e.clientY - mousePos.y;
-
-    if (isDragging) {
-      e.preventDefault();
-      mousePos = { x: e.clientX, y: e.clientY };
-      if (dragNode) {
-        if (Math.abs(e.clientX - dragStartPos.x) > 2 || Math.abs(e.clientY - dragStartPos.y) > 2) {
-          movedDuringDrag = true;
-          suppressClick = true;
-        }
-        dragWorldPos = {
-          x: dragWorldPos.x + dx / transform.k,
-          y: dragWorldPos.y + dy / transform.k,
-        };
-        dragNode.x = dragWorldPos.x;
-        dragNode.y = dragWorldPos.y;
-        dragNode.vx = 0;
-        dragNode.vy = 0;
-      } else {
-        if (Math.abs(e.clientX - dragStartPos.x) > 2 || Math.abs(e.clientY - dragStartPos.y) > 2) {
-          movedDuringDrag = true;
-          suppressClick = true;
-          userManipulatedView = true;
-        }
-        transform = { ...transform, x: transform.x + dx, y: transform.y + dy };
-        if (!simRunning) render();
-      }
-    } else {
-      const prevHover = hoverNode;
-      const pos = getWorldPos(e.clientX, e.clientY);
-      hoverNode = findNodeAt(pos.x, pos.y);
-      if (canvas) canvas.style.cursor = hoverNode ? 'pointer' : 'grab';
-      if (hoverNode !== prevHover && !simRunning) {
-        render();
-      }
-    }
-  }
-
-  function onMouseUp() {
-    if (!isDragging) return;
-    clearInteractionState();
-  }
-
-  function onClick(e) {
-    if (suppressClick) {
-      suppressClick = false;
-      return;
-    }
-
-    const pos = getWorldPos(e.clientX, e.clientY);
-    const node = findNodeAt(pos.x, pos.y);
-
-    if (!node) {
-      selectedNodeId = null;
-      return;
-    }
-
-    if (selectedNodeId === node.id) {
-      dispatch('navigate', node.id);
-      return;
-    }
-
-    selectedNodeId = node.id;
-  }
-
-  function onWheel(e) {
-    e.preventDefault();
-    const rect = canvas.getBoundingClientRect();
-    const mx = e.clientX - rect.left;
-    const my = e.clientY - rect.top;
-
-    const zoomFactor = e.deltaY > 0 ? 0.9 : 1.1;
-    const newK = Math.max(0.1, Math.min(5, transform.k * zoomFactor));
-
-    transform = {
-      ...transform,
-      x: mx - (mx - transform.x) * (newK / transform.k),
-      y: my - (my - transform.y) * (newK / transform.k),
-      k: newK,
-    };
-    userManipulatedView = true;
-    if (!simRunning) render();
-  }
-
-  function resetView() {
-    userManipulatedView = false;
-    hasFitted = false;
-    fitGraphToViewport(0.9);
   }
 </script>
 
@@ -983,20 +312,11 @@
   {:else if error}
     <div class="error">{error}</div>
   {:else}
-    <canvas
-      bind:this={canvas}
-      onmousedown={onMouseDown}
-      onclick={onClick}
-      onmouseleave={() => {
-        if (!isDragging) hoverNode = null;
-      }}
-      onwheel={onWheel}
-    ></canvas>
-    {#if nodes.length === 0}
+    {#if !hasData}
       <div class="empty graph-overlay">No notes found. Create some notes with [[WikiLinks]] to see the graph.</div>
     {/if}
     <div class="graph-controls">
-      <button onclick={resetView} title="Fit to view" disabled={nodes.length === 0}>
+      <button onclick={resetView} title="Fit to view" disabled={nodeCount === 0}>
         <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
       </button>
       <button
@@ -1016,7 +336,7 @@
           <path d="M9 18h10"/>
         </svg>
       </button>
-      <span class="graph-info">{nodes.length} notes · {links.length} links</span>
+      <span class="graph-info">{nodeCount} notes · {linkCount} links</span>
       {#if selectedNodeId}
         <span class="graph-info emphasis">Click selected note again to open it</span>
       {/if}
@@ -1033,17 +353,8 @@
     background: var(--bg);
   }
 
-  canvas {
-    width: 100%;
-    height: 100%;
+  .graph-view :global(canvas) {
     display: block;
-    cursor: grab;
-    touch-action: none;
-    user-select: none;
-  }
-
-  canvas:active {
-    cursor: grabbing;
   }
 
   .loading,
@@ -1149,5 +460,4 @@
     background: color-mix(in srgb, var(--bg) 82%, transparent);
     pointer-events: none;
   }
-
 </style>
