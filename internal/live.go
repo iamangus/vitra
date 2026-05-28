@@ -174,6 +174,7 @@ func (ls *LiveSync) flush() {
 
 	payload, err := json.Marshal(event)
 	if err != nil {
+		log.Printf("ERROR marshalling SSE event: %v", err)
 		return
 	}
 

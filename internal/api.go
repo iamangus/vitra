@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -15,7 +16,9 @@ const maxBodySize = 10 << 20 // 10 MB
 
 func writeJSON(w http.ResponseWriter, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(data)
+	if err := json.NewEncoder(w).Encode(data); err != nil {
+		log.Printf("ERROR encoding JSON response: %v", err)
+	}
 }
 
 func safeVaultPath(vaultPath, input string) (string, error) {
@@ -86,6 +89,7 @@ func (fs *FileSystem) HandleAPISaveNote(w http.ResponseWriter, r *http.Request) 
 
 	content, err := io.ReadAll(io.LimitReader(r.Body, maxBodySize))
 	if err != nil {
+		log.Printf("ERROR saving note %s: read body: %v", path, err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -101,11 +105,13 @@ func (fs *FileSystem) HandleAPISaveNote(w http.ResponseWriter, r *http.Request) 
 	isNewNote := os.IsNotExist(statErr)
 	dir := filepath.Dir(fullPath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
+		log.Printf("ERROR saving note %s: mkdir %s: %v", path, dir, err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	if err := os.WriteFile(fullPath, content, 0644); err != nil {
+		log.Printf("ERROR saving note %s: write file: %v", path, err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

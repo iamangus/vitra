@@ -11,6 +11,26 @@ import (
 	"vitra/internal"
 )
 
+type loggingResponseWriter struct {
+	http.ResponseWriter
+	statusCode int
+}
+
+func (lrw *loggingResponseWriter) WriteHeader(code int) {
+	lrw.statusCode = code
+	lrw.ResponseWriter.WriteHeader(code)
+}
+
+func loggingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		lrw := &loggingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
+		next.ServeHTTP(lrw, r)
+		if lrw.statusCode >= 500 {
+			log.Printf("%s %s %d", r.Method, r.URL.Path, lrw.statusCode)
+		}
+	})
+}
+
 func main() {
 	vaultPath := os.Getenv("VAULT_PATH")
 	if vaultPath == "" {
@@ -69,6 +89,8 @@ func main() {
 		port = "8080"
 	}
 
+	handler := loggingMiddleware(http.DefaultServeMux)
+
 	log.Printf("Vitra starting on :%s with vault at %s", port, vaultPath)
-	log.Fatal(http.ListenAndServe(":"+port, nil))
+	log.Fatal(http.ListenAndServe(":"+port, handler))
 }

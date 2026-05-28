@@ -81,7 +81,8 @@
         await loadBacklinks();
         setTimeout(() => saveStatus = '', 2000);
       } catch (e) {
-        saveStatus = 'Error';
+        console.error('Save failed:', e);
+        saveStatus = 'Save error';
       }
     }, 500);
 
