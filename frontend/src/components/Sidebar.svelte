@@ -129,6 +129,12 @@
     closeContextMenu();
   }
 
+  function ctxDownload() {
+    if (!contextMenu.path) return;
+    files.download(contextMenu.path);
+    closeContextMenu();
+  }
+
   $: isCollapsed = !sidebarOpen;
 
   onMount(() => {
@@ -217,6 +223,7 @@
 <!-- Context Menu -->
 {#if contextMenu.show}
   <div id="context-menu" style="left: {contextMenu.x}px; top: {contextMenu.y}px;" on:click|stopPropagation>
+    <button on:click={ctxDownload}>Download</button>
     <button on:click={ctxNewNote}>New Note</button>
     <button on:click={ctxRename}>Rename</button>
     <button on:click={ctxDelete} class="danger">Delete</button>

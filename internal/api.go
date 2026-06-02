@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"archive/zip"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -262,6 +263,68 @@ func (fs *FileSystem) HandleAPIDelete(w http.ResponseWriter, r *http.Request) {
 	fs.NotifyVaultChange([]string{path}, true, true, true, true)
 
 	w.WriteHeader(http.StatusOK)
+}
+
+func (fs *FileSystem) HandleAPIDownload(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Query().Get("path")
+	if path == "" {
+		http.Error(w, "Path required", http.StatusBadRequest)
+		return
+	}
+
+	fullPath, err := safeVaultPath(fs.VaultPath, path)
+	if err != nil {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+
+	info, err := os.Stat(fullPath)
+	if err != nil {
+		http.Error(w, "Not found", http.StatusNotFound)
+		return
+	}
+
+	if info.IsDir() {
+		w.Header().Set("Content-Type", "application/zip")
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s.zip", info.Name()))
+
+		zipWriter := zip.NewWriter(w)
+		defer zipWriter.Close()
+
+		filepath.Walk(fullPath, func(filePath string, info os.FileInfo, err error) error {
+			if err != nil || info.IsDir() {
+				return nil
+			}
+
+			relPath, err := filepath.Rel(fullPath, filePath)
+			if err != nil {
+				return nil
+			}
+
+			header, err := zip.FileInfoHeader(info)
+			if err != nil {
+				return nil
+			}
+			header.Name = relPath
+
+			writer, err := zipWriter.CreateHeader(header)
+			if err != nil {
+				return nil
+			}
+
+			file, err := os.Open(filePath)
+			if err != nil {
+				return nil
+			}
+			defer file.Close()
+
+			_, err = io.Copy(writer, file)
+			return nil
+		})
+	} else {
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s", info.Name()))
+		http.ServeFile(w, r, fullPath)
+	}
 }
 
 func (fs *FileSystem) HandleAPISearch(w http.ResponseWriter, r *http.Request) {

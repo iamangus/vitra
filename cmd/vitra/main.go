@@ -60,6 +60,7 @@ func main() {
 	http.HandleFunc("POST /api/folders", fs.HandleAPICreateFolder)
 	http.HandleFunc("PUT /api/rename", fs.HandleAPIRename)
 	http.HandleFunc("DELETE /api/delete", fs.HandleAPIDelete)
+	http.HandleFunc("GET /api/download", fs.HandleAPIDownload)
 	http.HandleFunc("GET /api/search", fs.HandleAPISearch)
 	http.HandleFunc("GET /api/backlinks/{path...}", fs.HandleAPIBacklinks)
 	http.HandleFunc("GET /api/graph", fs.HandleAPIGraph)

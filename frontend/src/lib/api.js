@@ -22,6 +22,9 @@ async function api(endpoint, options = {}) {
 
 export const files = {
   list: (activePath = '') => api(`/files?active=${encodeURIComponent(activePath)}`),
+  download: (path) => {
+    window.location.href = `/api/download?path=${encodeURIComponent(path)}`;
+  },
 };
 
 export const notes = {
