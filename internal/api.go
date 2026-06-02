@@ -272,7 +272,7 @@ func (fs *FileSystem) HandleAPIDownload(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	fullPath, err := safeVaultPath(fs.VaultPath, path)
+	fullPath, err := safeVaultPath(fs.VaultPath, path+".md")
 	if err != nil {
 		http.Error(w, "Invalid path", http.StatusBadRequest)
 		return
