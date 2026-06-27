@@ -7,8 +7,10 @@
 
   export let query = '';
 
+  let mode = 'fulltext';
   let results = [];
   let loading = false;
+  let semanticError = '';
   let liveSearchTimeout;
 
   $: if (query) {
@@ -21,14 +23,30 @@
       return;
     }
     loading = true;
+    semanticError = '';
     try {
-      results = await search.query(query);
+      if (mode === 'semantic') {
+        results = await search.semantic(query);
+      } else {
+        results = await search.query(query);
+      }
     } catch (e) {
       console.error('Search failed:', e);
-      results = [];
+      if (mode === 'semantic') {
+        semanticError = e.message || 'Semantic search unavailable';
+        results = [];
+      } else {
+        results = [];
+      }
     } finally {
       loading = false;
     }
+  }
+
+  function switchMode(newMode) {
+    if (mode === newMode) return;
+    mode = newMode;
+    if (query) performSearch();
   }
 
   function handleSubmit(e) {
@@ -76,12 +94,28 @@
         >
         <button type="submit" class="search-btn">Search</button>
       </div>
+      <div class="mode-toggle" role="group" aria-label="Search mode">
+        <button
+          type="button"
+          class:active={mode === 'fulltext'}
+          on:click={() => switchMode('fulltext')}
+        >Full-text</button>
+        <button
+          type="button"
+          class:active={mode === 'semantic'}
+          on:click={() => switchMode('semantic')}
+        >Semantic</button>
+      </div>
     </form>
 
     {#if query}
       <p class="search-meta">
         {results.length} result{results.length !== 1 ? 's' : ''} for "{query}"
       </p>
+
+      {#if mode === 'semantic' && semanticError}
+        <div class="search-error">{semanticError}</div>
+      {/if}
 
       {#if loading}
         <div class="search-loading">
@@ -109,14 +143,20 @@
                 {#if result.path.includes('/')}
                   <span class="result-path">{result.path}</span>
                 {/if}
+                {#if mode === 'semantic' && result.distance != null}
+                  <span class="result-score">{(1 - result.distance).toFixed(2)} match</span>
+                {/if}
               </div>
+              {#if mode === 'semantic' && result.heading}
+                <span class="result-heading">{result.heading}</span>
+              {/if}
               <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="result-arrow">
                 <path d="m9 18 6-6-6-6"/>
               </svg>
             </a>
           {/each}
         </div>
-      {:else}
+      {:else if !(mode === 'semantic' && semanticError)}
         <div class="search-empty">
           <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="empty-icon">
             <circle cx="11" cy="11" r="8"/>
@@ -304,6 +344,57 @@
     margin: 0;
     color: var(--color-muted);
     font-size: 0.9375rem;
+  }
+
+  .mode-toggle {
+    display: inline-flex;
+    margin-top: 0.5rem;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+  }
+
+  .mode-toggle button {
+    background: transparent;
+    border: none;
+    padding: 0.25rem 0.75rem;
+    font-size: 0.75rem;
+    color: var(--color-muted);
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+  }
+
+  .mode-toggle button:not(:last-child) {
+    border-right: 1px solid var(--border-color);
+  }
+
+  .mode-toggle button.active {
+    background: var(--primary);
+    color: var(--primary-color);
+  }
+
+  .result-score {
+    font-size: 0.6875rem;
+    color: var(--color-faint);
+  }
+
+  .result-heading {
+    font-size: 0.6875rem;
+    color: var(--color-faint);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 8rem;
+  }
+
+  .search-error {
+    font-size: 0.8125rem;
+    color: var(--danger, #dc2626);
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    padding: 0.5rem 0.75rem;
+    margin-bottom: 1rem;
   }
 
   /* Mobile */

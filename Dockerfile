@@ -1,27 +1,24 @@
-# syntax=docker/dockerfile:1
-
-# Stage 1: Build frontend
-FROM node:22-alpine AS frontend-builder
+# ---- Frontend build ----
+FROM node:20-alpine AS frontend
 WORKDIR /app/frontend
 COPY frontend/package*.json ./
 RUN npm ci
 COPY frontend/ ./
 RUN npm run build
 
-# Stage 2: Build Go binary
-FROM golang:1.25-alpine AS go-builder
+# ---- Go build ----
+FROM golang:1.25-alpine AS builder
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
-RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /app/vitra ./cmd/vitra
+COPY --from=frontend /app/frontend/dist ./frontend/dist
+RUN go build -o vitra ./cmd/vitra
 
-# Stage 3: Final minimal image
-FROM gcr.io/distroless/static:nonroot
-WORKDIR /
-COPY --from=go-builder /app/vitra /vitra
-EXPOSE 8080
-ENV PORT=8080
-USER nonroot:nonroot
-ENTRYPOINT ["/vitra"]
+# ---- Runtime ----
+FROM alpine:latest
+RUN apk --no-cache add ca-certificates
+WORKDIR /root/
+COPY --from=builder /app/vitra .
+EXPOSE 8080 3000 3001
+CMD ["./vitra"]

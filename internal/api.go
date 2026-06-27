@@ -2,6 +2,7 @@ package internal
 
 import (
 	"archive/zip"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,7 +11,10 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+
+	"github.com/iamangus/vitra/internal/vector"
 )
 
 const maxBodySize = 10 << 20 // 10 MB
@@ -116,7 +120,10 @@ func (fs *FileSystem) HandleAPISaveNote(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-
+	if fs.index != nil {
+		fs.index.UpdateFile(fs.VaultPath, path)
+	}
+	fs.autoIndex(path, string(content))
 	fs.NotifyVaultChange([]string{path}, isNewNote, true, true, true)
 
 	w.WriteHeader(http.StatusOK)
@@ -159,7 +166,10 @@ func (fs *FileSystem) HandleAPICreateNote(w http.ResponseWriter, r *http.Request
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-
+	if fs.index != nil {
+		fs.index.UpdateFile(fs.VaultPath, req.Path)
+	}
+	fs.autoIndex(req.Path, content)
 	fs.NotifyVaultChange([]string{req.Path}, true, true, true, true)
 
 	w.WriteHeader(http.StatusCreated)
@@ -231,6 +241,26 @@ func (fs *FileSystem) HandleAPIRename(w http.ResponseWriter, r *http.Request) {
 	if fs.index != nil {
 		fs.index.RenameFile(relOld, relNew)
 	}
+	if fs.VectorStore != nil {
+		fs.autoDelete(relOld)
+		info, err := os.Stat(newFull)
+		if err == nil && !info.IsDir() && strings.HasSuffix(req.New, ".md") {
+			if content, err := os.ReadFile(newFull); err == nil {
+				fs.autoIndex(relNew, string(bytes.TrimSpace(content)))
+			}
+		} else if err == nil && info.IsDir() {
+			filepath.WalkDir(newFull, func(p string, d os.DirEntry, err error) error {
+				if err != nil || d.IsDir() || !strings.HasSuffix(d.Name(), ".md") {
+					return nil
+				}
+				rel, _ := filepath.Rel(fs.VaultPath, p)
+				if c, err := os.ReadFile(p); err == nil {
+					fs.autoIndex(strings.TrimSuffix(filepath.ToSlash(rel), ".md"), string(bytes.TrimSpace(c)))
+				}
+				return nil
+			})
+		}
+	}
 
 	fs.NotifyVaultChange([]string{relOld, relNew}, true, true, true, true)
 
@@ -250,14 +280,29 @@ func (fs *FileSystem) HandleAPIDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	relPath := filepath.ToSlash(path)
+	relTrim := strings.TrimSuffix(relPath, ".md")
+	// If deleting a folder, remove all contained notes from the vector index first.
+	if fs.VectorStore != nil {
+		if info, err := os.Stat(fullPath); err == nil && info.IsDir() {
+			filepath.WalkDir(fullPath, func(p string, d os.DirEntry, err error) error {
+				if err != nil || d.IsDir() || !strings.HasSuffix(d.Name(), ".md") {
+					return nil
+				}
+				rel, _ := filepath.Rel(fs.VaultPath, p)
+				fs.autoDelete(strings.TrimSuffix(filepath.ToSlash(rel), ".md"))
+				return nil
+			})
+		} else {
+			fs.autoDelete(relTrim)
+		}
+	}
 	if err := os.RemoveAll(fullPath); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-
-	relPath := filepath.ToSlash(path)
 	if fs.index != nil {
-		fs.index.RemoveFile(relPath)
+		fs.index.RemoveFile(relTrim)
 	}
 
 	fs.NotifyVaultChange([]string{path}, true, true, true, true)
@@ -369,6 +414,34 @@ func (fs *FileSystem) HandleAPISearch(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 
+	writeJSON(w, results)
+}
+
+func (fs *FileSystem) HandleAPISemanticSearch(w http.ResponseWriter, r *http.Request) {
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	if query == "" {
+		writeJSON(w, []any{})
+		return
+	}
+	limit := 5
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if n, err := strconv.Atoi(l); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	results, err := fs.SemanticSearch(r.Context(), query, limit)
+	if err != nil {
+		// Distinguish "not configured" from real errors so the UI can fall back.
+		if strings.Contains(err.Error(), "not configured") {
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if results == nil {
+		results = []vector.SearchResult{}
+	}
 	writeJSON(w, results)
 }
 

@@ -1,14 +1,22 @@
 package main
 
 import (
-	iofs "io/fs"
+	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
-
+	"os/signal"
+	"path/filepath"
 	"strings"
-	frontend "vitra/frontend"
-	"vitra/internal"
+	"syscall"
+
+	iofs "io/fs"
+
+	"github.com/iamangus/vitra/frontend"
+	"github.com/iamangus/vitra/internal"
+	"github.com/iamangus/vitra/internal/mcp"
+	"github.com/iamangus/vitra/internal/vector"
 )
 
 type loggingResponseWriter struct {
@@ -37,11 +45,20 @@ func loggingMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func main() {
-	vaultPath := os.Getenv("VAULT_PATH")
-	if vaultPath == "" {
-		vaultPath = "./vault"
+func env(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
 	}
+	return def
+}
+
+func main() {
+	vaultPath := env("VAULT_PATH", "./vault")
+	port := env("PORT", "8080")
+	toolsPort := env("MCP_TOOLS_PORT", "3000")
+	skillsPort := env("MCP_SKILLS_PORT", "3001")
+	skillsDirName := env("SKILLS_DIR_NAME", "skills")
+	chromemPath := env("CHROMEM_PATH", filepath.Join(vaultPath, ".chromem"))
 
 	fs := internal.NewFileSystem(vaultPath)
 	if err := fs.BuildIndex(); err != nil {
@@ -52,37 +69,47 @@ func main() {
 	}
 	defer fs.CloseWatcher()
 
-	http.HandleFunc("GET /api/files", fs.HandleAPIFileTree)
-	http.HandleFunc("GET /api/events", fs.HandleAPIEvents)
-	http.HandleFunc("GET /api/note/{path...}", fs.HandleAPIViewNote)
-	http.HandleFunc("POST /api/note/{path...}", fs.HandleAPISaveNote)
-	http.HandleFunc("POST /api/notes", fs.HandleAPICreateNote)
-	http.HandleFunc("POST /api/folders", fs.HandleAPICreateFolder)
-	http.HandleFunc("PUT /api/rename", fs.HandleAPIRename)
-	http.HandleFunc("DELETE /api/delete", fs.HandleAPIDelete)
-	http.HandleFunc("GET /api/download", fs.HandleAPIDownload)
-	http.HandleFunc("GET /api/search", fs.HandleAPISearch)
-	http.HandleFunc("GET /api/backlinks/{path...}", fs.HandleAPIBacklinks)
-	http.HandleFunc("GET /api/graph", fs.HandleAPIGraph)
-	http.HandleFunc("POST /api/preview/{path...}", fs.HandleAPIPreview)
+	// Vector store: embedded chromem-go. Construction succeeds even without
+	// an embedding API key; embedding calls fail at use-time so the web UI and
+	// tools MCP can start regardless and surface "not configured" errors.
+	store, err := vector.NewChromemStore(chromemPath, false, nil)
+	if err != nil {
+		log.Fatalf("failed to open vector store at %s: %v", chromemPath, err)
+	}
+	defer store.Close()
+	fs.SetVectorStore(store)
+	log.Printf("vector store initialized at %s", chromemPath)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/files", fs.HandleAPIFileTree)
+	mux.HandleFunc("GET /api/events", fs.HandleAPIEvents)
+	mux.HandleFunc("GET /api/note/{path...}", fs.HandleAPIViewNote)
+	mux.HandleFunc("POST /api/note/{path...}", fs.HandleAPISaveNote)
+	mux.HandleFunc("POST /api/notes", fs.HandleAPICreateNote)
+	mux.HandleFunc("POST /api/folders", fs.HandleAPICreateFolder)
+	mux.HandleFunc("PUT /api/rename", fs.HandleAPIRename)
+	mux.HandleFunc("DELETE /api/delete", fs.HandleAPIDelete)
+	mux.HandleFunc("GET /api/download", fs.HandleAPIDownload)
+	mux.HandleFunc("GET /api/search", fs.HandleAPISearch)
+	mux.HandleFunc("GET /api/search/semantic", fs.HandleAPISemanticSearch)
+	mux.HandleFunc("GET /api/backlinks/{path...}", fs.HandleAPIBacklinks)
+	mux.HandleFunc("GET /api/graph", fs.HandleAPIGraph)
+	mux.HandleFunc("POST /api/preview/{path...}", fs.HandleAPIPreview)
 
 	distFS, err := iofs.Sub(frontend.Dist, "dist")
 	if err != nil {
 		log.Fatalf("failed to load embedded frontend assets: %v", err)
 	}
 	fileServer := http.FileServer(http.FS(distFS))
-
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/api/") {
 			http.NotFound(w, r)
 			return
 		}
-
 		assetPath := strings.TrimPrefix(strings.TrimPrefix(r.URL.Path, "/"), "./")
 		if assetPath == "" {
 			assetPath = "index.html"
 		}
-
 		info, err := iofs.Stat(distFS, assetPath)
 		if err != nil || info.IsDir() || r.URL.Path == "/" {
 			http.ServeFileFS(w, r, distFS, "index.html")
@@ -91,13 +118,40 @@ func main() {
 		fileServer.ServeHTTP(w, r)
 	})
 
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
+	errCh := make(chan error, 3)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	webServer := &http.Server{Addr: ":" + port, Handler: loggingMiddleware(mux)}
+	go func() {
+		log.Printf("vitra web server listening on :%s (vault: %s)", port, vaultPath)
+		if err := webServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			errCh <- fmt.Errorf("web server: %w", err)
+		}
+	}()
+
+	go func() {
+		log.Printf("vitra tools MCP server listening on :%s/mcp", toolsPort)
+		if err := mcp.StartToolsServer(fs, toolsPort); err != nil {
+			errCh <- fmt.Errorf("tools MCP: %w", err)
+		}
+	}()
+
+	skillsDir := filepath.Join(vaultPath, skillsDirName)
+	go func() {
+		log.Printf("vitra skills MCP server listening on :%s/mcp (skills dir: %s)", skillsPort, skillsDir)
+		if err := mcp.StartSkillsServer(skillsDir, skillsPort); err != nil {
+			errCh <- fmt.Errorf("skills MCP: %w", err)
+		}
+	}()
+
+	select {
+	case <-ctx.Done():
+		log.Printf("shutting down...")
+		shutCtx, cancel := context.WithTimeout(context.Background(), 0)
+		defer cancel()
+		_ = webServer.Shutdown(shutCtx)
+	case err := <-errCh:
+		log.Printf("fatal: %v", err)
 	}
-
-	handler := loggingMiddleware(http.DefaultServeMux)
-
-	log.Printf("Vitra starting on :%s with vault at %s", port, vaultPath)
-	log.Fatal(http.ListenAndServe(":"+port, handler))
 }

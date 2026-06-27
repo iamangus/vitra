@@ -67,6 +67,7 @@ export const fileOps = {
 
 export const search = {
   query: (q) => api(`/search?q=${encodeURIComponent(q)}`),
+  semantic: (q, limit = 5) => api(`/search/semantic?q=${encodeURIComponent(q)}&limit=${limit}`),
 };
 
 export const backlinks = {
