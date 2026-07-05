@@ -3,6 +3,7 @@
   import { files, folders, fileOps } from '../lib/api.js';
   import { subscribeToLiveUpdates } from '../lib/live.js';
   import FileTree from './FileTree.svelte';
+  import Activity from './Activity.svelte';
   import { theme } from '../stores/theme.js';
 
   const dispatch = createEventDispatcher();
@@ -18,6 +19,7 @@
   let sidebarWidth = 280;
   let isResizing = false;
   let liveTreeReloadTimeout;
+  let activeTab = 'files';
 
   async function loadTree() {
     try {
@@ -209,10 +211,20 @@
     </button>
   </div>
 
-  <!-- File Tree -->
-  <div class="file-tree" on:contextmenu={handleContextMenu}>
-    <FileTree nodes={treeData} {activePath} on:navigate />
+  <!-- Tab strip -->
+  <div class="sidebar-tabs">
+    <button class="tab-btn" class:active={activeTab === 'files'} on:click={() => activeTab = 'files'}>Files</button>
+    <button class="tab-btn" class:active={activeTab === 'activity'} on:click={() => activeTab = 'activity'}>Activity</button>
   </div>
+
+  <!-- File Tree -->
+  {#if activeTab === 'files'}
+    <div class="file-tree" on:contextmenu={handleContextMenu}>
+      <FileTree nodes={treeData} {activePath} on:navigate />
+    </div>
+  {:else}
+    <Activity />
+  {/if}
 
   <!-- Resize Handle (desktop only) -->
   {#if !mobile}
@@ -394,6 +406,35 @@
     flex: 1;
     overflow-y: auto;
     padding: 0.5rem;
+  }
+
+  .sidebar-tabs {
+    display: flex;
+    border-bottom: 1px solid var(--border-color);
+    flex-shrink: 0;
+  }
+
+  .tab-btn {
+    flex: 1;
+    padding: 0.5rem 0.75rem;
+    font-size: 0.75rem;
+    font-weight: 500;
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--color-muted);
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+
+  .tab-btn:hover {
+    color: var(--color);
+    background: var(--hover-bg);
+  }
+
+  .tab-btn.active {
+    color: var(--primary);
+    border-bottom-color: var(--primary);
   }
 
   .resize-handle {

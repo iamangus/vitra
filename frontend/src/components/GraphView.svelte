@@ -122,12 +122,38 @@
     const dark = isDark();
     const selConn = getSelectedConnected();
     const hovConn = getHoverConnected();
+    const base = typeColors[node.type || 'Note'] || typeColors['Note'];
     if (node.id === selectedNodeId) return dark ? '#c084fc' : '#6d28d9';
     if (node.id === hoverNodeId) return dark ? '#c084fc' : '#6d28d9';
-    if (selConn.has(node.id)) return dark ? '#a855f7' : '#7c3aed';
-    if (hovConn.has(node.id)) return dark ? '#a855f7' : '#7c3aed';
+    if (selConn.has(node.id)) return dark ? lighten(base, 0.85) : darken(base, 0.7);
+    if (hovConn.has(node.id)) return dark ? lighten(base, 0.85) : darken(base, 0.7);
     if (selectedNodeId) return dark ? 'rgba(168, 85, 247, 0.28)' : 'rgba(124, 58, 237, 0.28)';
-    return dark ? 'rgba(168, 85, 247, 0.82)' : 'rgba(124, 58, 237, 0.82)';
+    return base;
+  }
+
+  const typeColors = {
+    'Note':       'rgba(124, 58, 237, 0.82)',
+    'Metric':     'rgba(59, 130, 246, 0.82)',
+    'Runbook':    'rgba(239, 68, 68, 0.82)',
+    'API':        'rgba(34, 197, 94, 0.82)',
+    'Table':      'rgba(245, 158, 11, 0.82)',
+    'Skill':      'rgba(168, 85, 247, 0.82)',
+    'Definition': 'rgba(20, 184, 166, 0.82)',
+    'Reference':  'rgba(236, 72, 153, 0.82)',
+  };
+
+  function lighten(rgba, amt) {
+    const m = rgba.match(/[\d.]+/g);
+    if (!m || m.length < 4) return rgba;
+    const [r, g, b, a] = [parseFloat(m[0]), parseFloat(m[1]), parseFloat(m[2]), parseFloat(m[3])];
+    return `rgba(${Math.min(255, r * amt)}, ${Math.min(255, g * amt)}, ${Math.min(255, b * amt)}, ${a})`;
+  }
+
+  function darken(rgba, amt) {
+    const m = rgba.match(/[\d.]+/g);
+    if (!m || m.length < 4) return rgba;
+    const [r, g, b, a] = [parseFloat(m[0]), parseFloat(m[1]), parseFloat(m[2]), parseFloat(m[3])];
+    return `rgba(${Math.floor(r * amt)}, ${Math.floor(g * amt)}, ${Math.floor(b * amt)}, ${a})`;
   }
 
   function getLinkColor(link) {
@@ -260,6 +286,7 @@
       return {
         id: n.id,
         title: n.title,
+        type: n.type || 'Note',
         val: 1 + Math.pow(linkRatio, 1.7) * 6,
       };
     });

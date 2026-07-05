@@ -1,8 +1,8 @@
 # Agent Instructions for Vitra
 
-Vitra is a merged project: a vault-backed markdown wiki web app **plus** two MCP
-servers (tools + skills) **plus** an embedded semantic vector store, all in one
-Go binary.
+Vitra is a merged project: a vault-backed markdown wiki web app **plus** an MCP
+server **plus** an embedded semantic vector store, all in one Go binary. The
+vault follows OKF v0.1 conventions (YAML frontmatter with type/title/tags).
 
 ## Development Workflow
 
@@ -30,17 +30,16 @@ go build -o tmp/main ./cmd/vitra && ./tmp/main
 
 Env vars (all optional, defaults shown):
 
-| Var              | Default        | Purpose                                          |
-|------------------|----------------|--------------------------------------------------|
-| `VAULT_PATH`     | `./vault`      | Path to the notes vault                           |
-| `PORT`           | `8080`         | Web UI port                                       |
-| `MCP_TOOLS_PORT` | `3000`         | Tools MCP server port (Streamable HTTP at `/mcp`) |
-| `MCP_SKILLS_PORT`| `3001`         | Skills MCP server port (Streamable HTTP at `/mcp`)|
-| `SKILLS_DIR_NAME`| `skills`        | Subdirectory of the vault holding skill markdown  |
-| `CHROMEM_PATH`   | `<vault>/.chromem` | chromem-go persistence dir                   |
-| `EMBEDDING_API_URL` | (OpenRouter default) | OpenAI-compatible embedding endpoint      |
-| `EMBEDDING_API_KEY` | —              | API key for embedding provider                   |
-| `EMBEDDING_MODEL`| `text-embedding-3-small` | Embedding model name                   |
+| Var              | Default          | Purpose                                          |
+|------------------|------------------|--------------------------------------------------|
+| `VAULT_PATH`     | `./vault`        | Path to the notes vault                           |
+| `PORT`           | `8080`           | Web UI port                                       |
+| `MCP_TOOLS_PORT` | `3000`           | MCP server port (Streamable HTTP at `/mcp`)       |
+| `SKILLS_DIR_NAME`| `skills`         | Subdirectory of the vault holding skill markdown  |
+| `CHROMEM_PATH`   | `<vault>/.chromem` | chromem-go persistence dir                     |
+| `EMBEDDING_API_URL` | (OpenRouter default) | OpenAI-compatible embedding endpoint        |
+| `EMBEDDING_API_KEY` | —                | API key for embedding provider                   |
+| `EMBEDDING_MODEL`| `text-embedding-3-small` | Embedding model name                     |
 
 ## Build & verify
 
@@ -54,18 +53,19 @@ cd frontend && npm run build   # frontend must build
 
 ```
 .
-├── cmd/vitra/main.go        # Single binary: web + tools MCP + skills MCP
+├── cmd/vitra/main.go        # Single binary: web + MCP server
 ├── internal/
-│   ├── api.go                # HTTP handlers (files, notes, search, etc.)
-│   ├── filesystem.go         # FileSystem struct, vault ops, vector hooks
+│   ├── api.go                # HTTP handlers (files, notes, search, OKF endpoints)
+│   ├── filesystem.go         # FileSystem struct, vault ops, vector auto-index hooks
 │   ├── index.go              # In-memory substring index + backlinks + graph
-│   ├── markdown.go           # goldmark rendering with WikiLinks
+│   ├── markdown.go           # goldmark rendering with WikiLinks + frontmatter parser
 │   ├── live.go               # SSE live updates + fsnotify watcher
 │   ├── mcp/
-│   │   ├── server.go         # Tools MCP server (13 vault + vector tools)
-│   │   └── skills.go         # Skills MCP server (one no-param tool per .md)
+│   │   └── server.go         # MCP server (19 tools: vault + OKF + list_skills)
+│   ├── okf/
+│   │   └── okf.go            # OKF helpers: Extract, IsReservedFilename, ExtractOKFLinks, ParseLogEntries
 │   └── vector/
-│       ├── store.go          # VectorStore interface + SearchResult/Chunk
+│       ├── store.go          # VectorStore interface + SearchResult/Chunk/Filter
 │       ├── chromem.go        # chromem-go embedded implementation
 │       ├── embeddings.go      # OpenAI-compatible EmbeddingClient
 │       ├── chunker.go         # Note → chunks with heading breadcrumbs
@@ -93,45 +93,60 @@ cd frontend && npm run build   # frontend must build
 ## API Endpoints
 
 ### Web (port 8080)
-- `GET  /api/files` — file tree
-- `GET  /api/note/{path}` — note (content, html, frontmatter, breadcrumbs)
+- `GET  /api/files` — file tree (sidebar)
+- `GET  /api/note/{path}` — note (content, html, frontmatter, breadcrumbs, links)
 - `POST /api/note/{path}` — save note (auto-indexes to vector store)
 - `POST /api/notes` — create note
 - `POST /api/folders` — create folder
 - `PUT  /api/rename` — rename file/folder
 - `DELETE /api/delete` — delete file/folder (auto-removes from vector store)
-- `GET  /api/search?q=...` — full-text search
-- `GET  /api/search/semantic?q=...&limit=N` — semantic search via chromem-go
+- `GET  /api/search?q=...` — full-text substring search
+- `GET  /api/search/semantic?q=...&limit=N&type=...&tag=...` — semantic search via chromem-go
 - `GET  /api/backlinks/{path}` — backlinks
-- `GET  /api/graph` — graph nodes/links
+- `GET  /api/graph` — graph nodes (with `type` field) + links
 - `GET  /api/events` — SSE stream of vault changes
 - `POST /api/preview/{path}` — render markdown preview
+- `GET  /api/concepts?type=...&tag=...&resource=...&since=...&limit=...` — OKF concept catalog
+- `GET  /api/concepts/closure?path=...&depth=N` — transitive closure of link graph
+- `GET  /api/activity?path=...&limit=...` — aggregated log.md activity feed
+- `PATCH /api/note/{path}` — merge frontmatter updates (preserves body)
 
-### MCP servers
-- Tools MCP — Streamable HTTP at `http://localhost:3000/mcp`. Exposes 13 tools:
-  `read_note`, `write_note`, `create_note`, `delete_note`, `list_notes`,
-  `search_notes`, `rename_note`, `get_backlinks`, `create_folder`,
-  `search_wiki`, `find_similar_files`, `suggest_links`, `reindex_vault`.
-- Skills MCP — Streamable HTTP at `http://localhost:3001/mcp`. Exposes one
-  no-param tool per `*.md` file in `<VAULT_PATH>/<SKILLS_DIR_NAME>/`. Each tool
-  returns the full skill file content when called. Skill files use frontmatter
-  `name` + `description`; the directory is watched live (fsnotify).
+### MCP (port 3000)
+Streamable HTTP at `http://localhost:3000/mcp`. Tools:
+
+**Vault operations** (13): `read_note`, `write_note`, `create_note`,
+`delete_note`, `list_notes`, `search_notes`, `rename_note`, `get_backlinks`,
+`create_folder`, `search_wiki`, `find_similar_files`, `suggest_links`,
+`reindex_vault`.
+
+**OKF-aware (Scope D)** (5): `list_concepts`, `get_linked_concepts`,
+`get_transitive_closure`, `update_note`, `get_index`.
+
+**Skills** (1): `list_skills` — returns `[{name, title, description, path, type, tags}]`
+for each `*.md` in `skills/`. Use `read_note(path="skills/<name>")` to fetch
+full skill content.
 
 ## Skills convention
 
 Skill markdown files live in the vault under `SKILLS_DIR_NAME` (default
-`skills`). Frontmatter:
+`skills`). Frontmatter (OKF v0.1):
 
 ```markdown
 ---
-name: my_skill
-description: What this skill does, shown to the LLM as the tool description.
+type: Skill
+title: my_skill
+description: What this skill does, shown to the LLM as the description.
+tags: [example, demo]
 ---
 
 # Skill body
 
-The tool returns this entire file when invoked.
+The skill content — use read_note to fetch it.
 ```
 
-`name` must match `^[a-zA-Z_][a-zA-Z0-9_]*$`. Adding/editing/removing a `*.md`
-file live-updates the registered tool set.
+`title` is the primary tool identifier; `name` is used as fallback. If both are
+absent the filename (sanitized) is used. Skills are excluded from the OKF
+catalog (concepts, graph, activity, semantic index, vault index). The skills
+directory is also excluded from the sidebar file tree.
+
+`type` is OKF canonical (`Skill`, capitalized).

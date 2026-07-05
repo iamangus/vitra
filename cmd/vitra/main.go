@@ -56,11 +56,11 @@ func main() {
 	vaultPath := env("VAULT_PATH", "./vault")
 	port := env("PORT", "8080")
 	toolsPort := env("MCP_TOOLS_PORT", "3000")
-	skillsPort := env("MCP_SKILLS_PORT", "3001")
 	skillsDirName := env("SKILLS_DIR_NAME", "skills")
 	chromemPath := env("CHROMEM_PATH", filepath.Join(vaultPath, ".chromem"))
 
 	fs := internal.NewFileSystem(vaultPath)
+	fs.SetSkillsDir(skillsDirName)
 	if err := fs.BuildIndex(); err != nil {
 		log.Fatalf("failed to build vault index: %v", err)
 	}
@@ -95,6 +95,10 @@ func main() {
 	mux.HandleFunc("GET /api/backlinks/{path...}", fs.HandleAPIBacklinks)
 	mux.HandleFunc("GET /api/graph", fs.HandleAPIGraph)
 	mux.HandleFunc("POST /api/preview/{path...}", fs.HandleAPIPreview)
+	mux.HandleFunc("GET /api/concepts", fs.HandleAPIConcepts)
+	mux.HandleFunc("GET /api/concepts/closure", fs.HandleAPIConceptClosure)
+	mux.HandleFunc("GET /api/activity", fs.HandleAPIActivity)
+	mux.HandleFunc("PATCH /api/note/{path...}", fs.HandleAPIPatchNote)
 
 	distFS, err := iofs.Sub(frontend.Dist, "dist")
 	if err != nil {
@@ -118,7 +122,7 @@ func main() {
 		fileServer.ServeHTTP(w, r)
 	})
 
-	errCh := make(chan error, 3)
+	errCh := make(chan error, 2)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -132,16 +136,8 @@ func main() {
 
 	go func() {
 		log.Printf("vitra tools MCP server listening on :%s/mcp", toolsPort)
-		if err := mcp.StartToolsServer(fs, toolsPort); err != nil {
+		if err := mcp.StartToolsServer(fs, skillsDirName, toolsPort); err != nil {
 			errCh <- fmt.Errorf("tools MCP: %w", err)
-		}
-	}()
-
-	skillsDir := filepath.Join(vaultPath, skillsDirName)
-	go func() {
-		log.Printf("vitra skills MCP server listening on :%s/mcp (skills dir: %s)", skillsPort, skillsDir)
-		if err := mcp.StartSkillsServer(skillsDir, skillsPort); err != nil {
-			errCh <- fmt.Errorf("skills MCP: %w", err)
 		}
 	}()
 

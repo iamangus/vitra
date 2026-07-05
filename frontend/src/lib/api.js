@@ -77,3 +77,26 @@ export const backlinks = {
 export const graph = {
   get: () => api('/graph'),
 };
+
+export const concepts = {
+  list: (params = {}) => {
+    const qs = new URLSearchParams();
+    for (const [k, v] of Object.entries(params)) {
+      if (v !== undefined && v !== null && v !== '') {
+        if (Array.isArray(v)) v.forEach(x => qs.append(k, x));
+        else qs.set(k, v);
+      }
+    }
+    return api(`/concepts?${qs.toString()}`);
+  },
+  closure: (path, depth = 2) => api(`/concepts/closure?path=${encodeURIComponent(path)}&depth=${depth}`),
+};
+
+export const activity = {
+  list: (params = {}) => {
+    const qs = new URLSearchParams(params);
+    return api(`/activity?${qs.toString()}`);
+  },
+};
+
+export { api };

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 
@@ -97,12 +98,18 @@ func (c *ChromemStore) IndexNote(ctx context.Context, path string, chunks []Chun
 	contents := make([]string, len(chunks))
 	for i, ch := range chunks {
 		ids[i] = fmt.Sprintf("%s#%d", path, ch.Index)
-		metas[i] = map[string]string{
+		meta := map[string]string{
 			"path":    path,
 			"title":   getTitleFromPath(path),
 			"heading": ch.Heading,
 			"index":   fmt.Sprintf("%d", ch.Index),
+			"type":    ch.Type,
 		}
+		for _, tag := range ch.Tags {
+			tag = strings.ReplaceAll(strings.ToLower(tag), " ", "_")
+			meta["tag_"+tag] = "1"
+		}
+		metas[i] = meta
 		contents[i] = ch.Text
 	}
 
@@ -131,7 +138,7 @@ func (c *ChromemStore) DeleteNote(ctx context.Context, path string) error {
 }
 
 // SemanticSearch embeds the query and returns the nearest chunks.
-func (c *ChromemStore) SemanticSearch(ctx context.Context, query string, limit int) ([]SearchResult, error) {
+func (c *ChromemStore) SemanticSearch(ctx context.Context, query string, limit int, filter Filter) ([]SearchResult, error) {
 	if limit <= 0 {
 		limit = 5
 	}
@@ -139,7 +146,8 @@ func (c *ChromemStore) SemanticSearch(ctx context.Context, query string, limit i
 	if err != nil {
 		return nil, fmt.Errorf("embed query: %w", err)
 	}
-	results, err := c.coll.QueryEmbedding(ctx, emb, limit, nil, nil)
+	where := buildWhere(filter)
+	results, err := c.coll.QueryEmbedding(ctx, emb, limit, where, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -148,7 +156,7 @@ func (c *ChromemStore) SemanticSearch(ctx context.Context, query string, limit i
 
 // FindSimilarFiles returns notes semantically similar to the given path,
 // excluding the note itself.
-func (c *ChromemStore) FindSimilarFiles(ctx context.Context, path string, limit int) ([]SearchResult, error) {
+func (c *ChromemStore) FindSimilarFiles(ctx context.Context, path string, limit int, filter Filter) ([]SearchResult, error) {
 	if limit <= 0 {
 		limit = 5
 	}
@@ -158,8 +166,8 @@ func (c *ChromemStore) FindSimilarFiles(ctx context.Context, path string, limit 
 	if !ok {
 		return nil, fmt.Errorf("note not indexed: %s", path)
 	}
-	// Fetch extra to allow filtering out self-chunks while still returning `limit`.
-	results, err := c.coll.QueryEmbedding(ctx, emb, limit+20, nil, nil)
+	where := buildWhere(filter)
+	results, err := c.coll.QueryEmbedding(ctx, emb, limit+20, where, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -186,7 +194,7 @@ func (c *ChromemStore) CheckDuplicate(ctx context.Context, content string, thres
 	if threshold <= 0 {
 		threshold = 0.95
 	}
-	results, err := c.SemanticSearch(ctx, content, 1)
+	results, err := c.SemanticSearch(ctx, content, 1, Filter{})
 	if err != nil {
 		return nil, err
 	}
@@ -234,12 +242,22 @@ func (c *ChromemStore) toSearchResults(results []chromem.Result) []SearchResult 
 		path := r.Metadata["path"]
 		title := r.Metadata["title"]
 		heading := r.Metadata["heading"]
+		typ := r.Metadata["type"]
+		var tags []string
+		for k, v := range r.Metadata {
+			if strings.HasPrefix(k, "tag_") && v == "1" {
+				tags = append(tags, strings.TrimPrefix(k, "tag_"))
+			}
+		}
+		sort.Strings(tags)
 		out = append(out, SearchResult{
 			Path:     path,
 			Title:    title,
 			Heading:  heading,
 			Chunk:    r.Content,
 			Distance: 1.0 - r.Similarity,
+			Type:     typ,
+			Tags:     tags,
 		})
 	}
 	return out
@@ -260,6 +278,28 @@ func averageEmbeddings(embeddings [][]float32) []float32 {
 		avg[i] /= float32(len(embeddings))
 	}
 	return avg
+}
+
+// buildWhere translates an OKF Filter into a chromem `where` map. chromem
+// matches all keys exactly (AND across keys). For tag filtering we emit one
+// key per required tag (tag_<slug> = "1"); chromem's AND across keys gives the
+// intersection (AND) semantics specified in the plan.
+func buildWhere(f Filter) map[string]string {
+	if f.Type == "" && len(f.Tags) == 0 {
+		return nil
+	}
+	w := map[string]string{}
+	if f.Type != "" {
+		w["type"] = f.Type
+	}
+	for _, tag := range f.Tags {
+		tag = strings.ReplaceAll(strings.ToLower(strings.TrimSpace(tag)), " ", "_")
+		if tag == "" {
+			continue
+		}
+		w["tag_"+tag] = "1"
+	}
+	return w
 }
 
 func getTitleFromPath(path string) string {

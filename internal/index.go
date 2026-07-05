@@ -10,14 +10,16 @@ import (
 type NoteMeta struct {
 	Path     string
 	Title    string
+	Type     string
 	RawLinks []string
 	Content  string
 }
 
 type VaultIndex struct {
-	mu         sync.RWMutex
-	notes      map[string]*NoteMeta
-	titleIndex map[string]string
+	mu           sync.RWMutex
+	notes        map[string]*NoteMeta
+	titleIndex   map[string]string
+	skillsDirRel string
 }
 
 func NewVaultIndex() *VaultIndex {
@@ -25,6 +27,10 @@ func NewVaultIndex() *VaultIndex {
 		notes:      make(map[string]*NoteMeta),
 		titleIndex: make(map[string]string),
 	}
+}
+
+func (idx *VaultIndex) SetSkillsDir(rel string) {
+	idx.skillsDirRel = rel
 }
 
 func (idx *VaultIndex) Build(vaultPath string) error {
@@ -35,7 +41,16 @@ func (idx *VaultIndex) Build(vaultPath string) error {
 	idx.titleIndex = make(map[string]string)
 
 	return filepath.Walk(vaultPath, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() || !strings.HasSuffix(info.Name(), ".md") {
+		if err != nil || info.IsDir() {
+			if info != nil && info.IsDir() && idx.skillsDirRel != "" {
+				rel, rdErr := filepath.Rel(vaultPath, path)
+				if rdErr == nil && rel == idx.skillsDirRel {
+					return filepath.SkipDir
+				}
+			}
+			return nil
+		}
+		if !strings.HasSuffix(info.Name(), ".md") {
 			return nil
 		}
 		rel, _ := filepath.Rel(vaultPath, path)
@@ -54,8 +69,16 @@ func (idx *VaultIndex) indexFile(vaultPath, fullPath, relPath, title string) {
 	meta := &NoteMeta{
 		Path:     relPath,
 		Title:    title,
+		Type:     "Note",
 		Content:  string(content),
 		RawLinks: extractWikiLinkTargets(string(content)),
+	}
+	if fm, _ := parseNote(content); fm != nil {
+		if t, ok := fm["type"]; ok {
+			if s, ok := t.(string); ok && s != "" {
+				meta.Type = s
+			}
+		}
 	}
 
 	idx.notes[relPath] = meta
@@ -67,6 +90,10 @@ func (idx *VaultIndex) indexFile(vaultPath, fullPath, relPath, title string) {
 func (idx *VaultIndex) UpdateFile(vaultPath, relPath string) {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
+
+	if idx.skillsDirRel != "" && strings.HasPrefix(relPath+"/", idx.skillsDirRel+"/") {
+		return
+	}
 
 	fullPath := filepath.Join(vaultPath, relPath+".md")
 	title := strings.TrimSuffix(filepath.Base(relPath), ".md")
@@ -116,7 +143,7 @@ func (idx *VaultIndex) GetGraph() (nodes []GraphNode, links []GraphLink) {
 
 	nodes = make([]GraphNode, 0, len(idx.notes))
 	for _, meta := range idx.notes {
-		nodes = append(nodes, GraphNode{ID: meta.Path, Title: meta.Title})
+		nodes = append(nodes, GraphNode{ID: meta.Path, Title: meta.Title, Type: meta.Type})
 	}
 
 	seenLinks := make(map[string]bool)
@@ -236,6 +263,7 @@ func resolveTitle(titleIndex map[string]string, title string) string {
 type GraphNode struct {
 	ID    string `json:"id"`
 	Title string `json:"title"`
+	Type  string `json:"type"`
 }
 
 type GraphLink struct {

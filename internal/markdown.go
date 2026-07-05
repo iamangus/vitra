@@ -161,6 +161,10 @@ func findCaseInsensitivePath(vaultPath string, parts []string) string {
 	return ""
 }
 
+func ParseNote(content []byte) (frontmatter map[string]interface{}, body []byte) {
+	return parseNote(content)
+}
+
 func parseNote(content []byte) (frontmatter map[string]interface{}, body []byte) {
 	frontmatter = make(map[string]interface{})
 	body = content

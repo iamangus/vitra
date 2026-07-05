@@ -429,7 +429,13 @@ func (fs *FileSystem) HandleAPISemanticSearch(w http.ResponseWriter, r *http.Req
 			limit = n
 		}
 	}
-	results, err := fs.SemanticSearch(r.Context(), query, limit)
+	filter := vector.Filter{
+		Type: strings.TrimSpace(r.URL.Query().Get("type")),
+	}
+	if tags := r.URL.Query()["tag"]; len(tags) > 0 {
+		filter.Tags = tags
+	}
+	results, err := fs.SemanticSearch(r.Context(), query, limit, filter)
 	if err != nil {
 		// Distinguish "not configured" from real errors so the UI can fall back.
 		if strings.Contains(err.Error(), "not configured") {
@@ -530,4 +536,137 @@ func (fs *FileSystem) HandleAPIPreview(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "text/html")
 	w.Write([]byte(html))
+}
+
+// HandleAPIConcepts returns the OKF concept catalog for the vault, optionally
+// filtered by type, tag(s), resource, or updated-since. The response envelope
+// includes the vault-root index.md's declared okf_version when present.
+func (fs *FileSystem) HandleAPIConcepts(w http.ResponseWriter, r *http.Request) {
+	filter := ConceptFilter{
+		Type:     strings.TrimSpace(r.URL.Query().Get("type")),
+		Resource: strings.TrimSpace(r.URL.Query().Get("resource")),
+		Since:    strings.TrimSpace(r.URL.Query().Get("since")),
+	}
+	if tags := r.URL.Query()["tag"]; len(tags) > 0 {
+		filter.Tag = tags
+	}
+	limit := 0
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if n, err := strconv.Atoi(l); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	filter.Limit = limit
+
+	views, okfVersion, err := fs.ListConcepts(filter)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if views == nil {
+		views = []ConceptView{}
+	}
+	writeJSON(w, map[string]interface{}{
+		"okf_version": okfVersion,
+		"count":       len(views),
+		"concepts":    views,
+	})
+}
+
+// HandleAPIActivity aggregates log.md entries across the vault into a single
+// date-sorted feed (newest first). Optional `?path=` scopes the walk to a
+// subdirectory; `?limit=` caps the result count.
+func (fs *FileSystem) HandleAPIActivity(w http.ResponseWriter, r *http.Request) {
+	scope := strings.TrimSpace(r.URL.Query().Get("path"))
+	limit := 0
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if n, err := strconv.Atoi(l); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	entries, err := fs.ListActivity(scope, limit)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if entries == nil {
+		entries = []ActivityEntry{}
+	}
+	writeJSON(w, entries)
+}
+
+// HandleAPIConceptClosure walks the link graph from a seed concept up to
+// `depth` hops, returning the transitive closure of reachable concepts.
+func (fs *FileSystem) HandleAPIConceptClosure(w http.ResponseWriter, r *http.Request) {
+	seed := strings.TrimSpace(r.URL.Query().Get("path"))
+	if seed == "" {
+		http.Error(w, "path required", http.StatusBadRequest)
+		return
+	}
+	depth := 2
+	if d := r.URL.Query().Get("depth"); d != "" {
+		if n, err := strconv.Atoi(d); err == nil && n > 0 {
+			depth = n
+		}
+	}
+	closure, err := fs.TransitiveClosure(seed, depth)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if closure == nil {
+		closure = []ConceptView{}
+	}
+	writeJSON(w, closure)
+}
+
+// HandleAPIPatchNote merges frontmatter updates into an existing note,
+// preserving the body and auto-touching `timestamp` (unless supplied). Body
+// may also be supplied, in which case it replaces the current body.
+func (fs *FileSystem) HandleAPIPatchNote(w http.ResponseWriter, r *http.Request) {
+	path := r.PathValue("path")
+	if path == "" {
+		http.Error(w, "path required", http.StatusBadRequest)
+		return
+	}
+	var body struct {
+		Frontmatter map[string]interface{} `json:"frontmatter"`
+		Body        *string                `json:"body"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxBodySize)).Decode(&body); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if len(body.Frontmatter) == 0 && body.Body == nil {
+		http.Error(w, "no updates provided", http.StatusBadRequest)
+		return
+	}
+	if body.Body != nil {
+		fullPath, err := safeVaultPath(fs.VaultPath, path+".md")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if _, err := os.Stat(fullPath); err != nil {
+			http.Error(w, "note not found", http.StatusNotFound)
+			return
+		}
+		note, err := fs.ReadNote(path)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		newContent := EmitFrontmatter(note.Frontmatter) + *body.Body
+		if err := fs.WriteNote(path, newContent); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+	if len(body.Frontmatter) > 0 {
+		if err := fs.UpdateNoteMetadata(path, body.Frontmatter); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+	writeJSON(w, map[string]string{"status": "ok", "path": path})
 }
