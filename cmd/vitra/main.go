@@ -55,7 +55,6 @@ func env(key, def string) string {
 func main() {
 	vaultPath := env("VAULT_PATH", "./vault")
 	port := env("PORT", "8080")
-	toolsPort := env("MCP_TOOLS_PORT", "3000")
 	skillsDirName := env("SKILLS_DIR_NAME", "skills")
 	chromemPath := env("CHROMEM_PATH", filepath.Join(vaultPath, ".chromem"))
 
@@ -100,6 +99,9 @@ func main() {
 	mux.HandleFunc("GET /api/activity", fs.HandleAPIActivity)
 	mux.HandleFunc("PATCH /api/note/{path...}", fs.HandleAPIPatchNote)
 
+	mcpHandler := mcp.NewToolsServer(fs, skillsDirName)
+	mux.Handle("/mcp", mcpHandler)
+
 	distFS, err := iofs.Sub(frontend.Dist, "dist")
 	if err != nil {
 		log.Fatalf("failed to load embedded frontend assets: %v", err)
@@ -122,22 +124,15 @@ func main() {
 		fileServer.ServeHTTP(w, r)
 	})
 
-	errCh := make(chan error, 2)
+	errCh := make(chan error, 1)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	webServer := &http.Server{Addr: ":" + port, Handler: loggingMiddleware(mux)}
 	go func() {
-		log.Printf("vitra web server listening on :%s (vault: %s)", port, vaultPath)
+		log.Printf("vitra web server listening on :%s (vault: %s, MCP at /mcp)", port, vaultPath)
 		if err := webServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			errCh <- fmt.Errorf("web server: %w", err)
-		}
-	}()
-
-	go func() {
-		log.Printf("vitra tools MCP server listening on :%s/mcp", toolsPort)
-		if err := mcp.StartToolsServer(fs, skillsDirName, toolsPort); err != nil {
-			errCh <- fmt.Errorf("tools MCP: %w", err)
 		}
 	}()
 
@@ -146,6 +141,7 @@ func main() {
 		log.Printf("shutting down...")
 		shutCtx, cancel := context.WithTimeout(context.Background(), 0)
 		defer cancel()
+		_ = mcpHandler.Shutdown(shutCtx)
 		_ = webServer.Shutdown(shutCtx)
 	case err := <-errCh:
 		log.Printf("fatal: %v", err)

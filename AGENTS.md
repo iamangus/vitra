@@ -1,8 +1,9 @@
 # Agent Instructions for Vitra
 
 Vitra is a merged project: a vault-backed markdown wiki web app **plus** an MCP
-server **plus** an embedded semantic vector store, all in one Go binary. The
-vault follows OKF v0.1 conventions (YAML frontmatter with type/title/tags).
+endpoint **plus** an embedded semantic vector store, all in one Go binary. The
+vault follows OKF v0.1 conventions (YAML frontmatter with type/title/tags). The
+MCP endpoint is served on the same port as the web UI at `/mcp`.
 
 ## Development Workflow
 
@@ -33,8 +34,7 @@ Env vars (all optional, defaults shown):
 | Var              | Default          | Purpose                                          |
 |------------------|------------------|--------------------------------------------------|
 | `VAULT_PATH`     | `./vault`        | Path to the notes vault                           |
-| `PORT`           | `8080`           | Web UI port                                       |
-| `MCP_TOOLS_PORT` | `3000`           | MCP server port (Streamable HTTP at `/mcp`)       |
+| `PORT`           | `8080`           | Web UI + MCP port                                 |
 | `SKILLS_DIR_NAME`| `skills`         | Subdirectory of the vault holding skill markdown  |
 | `CHROMEM_PATH`   | `<vault>/.chromem` | chromem-go persistence dir                     |
 | `EMBEDDING_API_URL` | (OpenRouter default) | OpenAI-compatible embedding endpoint        |
@@ -53,7 +53,7 @@ cd frontend && npm run build   # frontend must build
 
 ```
 .
-├── cmd/vitra/main.go        # Single binary: web + MCP server
+├── cmd/vitra/main.go        # Single binary: web + MCP at /mcp
 ├── internal/
 │   ├── api.go                # HTTP handlers (files, notes, search, OKF endpoints)
 │   ├── filesystem.go         # FileSystem struct, vault ops, vector auto-index hooks
@@ -111,8 +111,8 @@ cd frontend && npm run build   # frontend must build
 - `GET  /api/activity?path=...&limit=...` — aggregated log.md activity feed
 - `PATCH /api/note/{path}` — merge frontmatter updates (preserves body)
 
-### MCP (port 3000)
-Streamable HTTP at `http://localhost:3000/mcp`. Tools:
+### MCP (at /mcp on web port)
+Streamable HTTP at `http://localhost:8080/mcp`. Tools:
 
 **Vault operations** (13): `read_note`, `write_note`, `create_note`,
 `delete_note`, `list_notes`, `search_notes`, `rename_note`, `get_backlinks`,

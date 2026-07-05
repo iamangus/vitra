@@ -14,9 +14,10 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 )
 
-// StartToolsServer starts the "tools" MCP server, exposing the vault file
-// operations plus the semantic vector tools. It blocks until the server stops.
-func StartToolsServer(fs *internal.FileSystem, skillsDirName string, port string) error {
+// NewToolsServer creates the tools MCP server, exposing the vault file
+// operations plus the semantic vector tools. Returns the streamable HTTP
+// handler to be mounted on the web mux (e.g. at /mcp).
+func NewToolsServer(fs *internal.FileSystem, skillsDirName string) *server.StreamableHTTPServer {
 	s := server.NewMCPServer(
 		"vitra-tools",
 		"1.0.0",
@@ -130,7 +131,7 @@ func StartToolsServer(fs *internal.FileSystem, skillsDirName string, port string
 		mcp.WithDescription("List available skills from the skills directory. Each skill is an OKF markdown file with frontmatter (title, description, type, tags). Use read_note to read the full skill content."),
 	), handleListSkills(fs, skillsDirName))
 
-	return server.NewStreamableHTTPServer(s).Start(":" + port)
+	return server.NewStreamableHTTPServer(s)
 }
 
 func handleReadNote(fs *internal.FileSystem) func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {

@@ -5,15 +5,11 @@ services:
     build: .
     ports:
       - "8080:8080"
-      - "3000:3000"
-      - "3001:3001"
     volumes:
       - nfs-vault:/vault
     environment:
       - VAULT_PATH=/vault
       - PORT=8080
-      - MCP_TOOLS_PORT=3000
-      - MCP_SKILLS_PORT=3001
       - SKILLS_DIR_NAME=skills
       - CHROMEM_PATH=/vault/.chromem
       - EMBEDDING_API_URL=${EMBEDDING_API_URL}
