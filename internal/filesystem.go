@@ -798,7 +798,7 @@ func (fs *FileSystem) UpdateNoteMetadata(path string, updates map[string]interfa
 func EmitFrontmatter(fm map[string]interface{}) string {
 	var b strings.Builder
 	b.WriteString("---\n")
-	order := []string{"type", "title", "description", "resource", "tags", "timestamp", "okf_version"}
+	order := []string{"type", "title", "summary", "description", "resource", "tags", "timestamp", "okf_version"}
 	written := make(map[string]bool)
 	for _, k := range order {
 		if v, ok := fm[k]; ok {
@@ -855,6 +855,64 @@ func yamlQuote(s string) string {
 		return strconv.Quote(s)
 	}
 	return s
+}
+
+// EnsureOKFFrontmatter guarantees OKF-compliant frontmatter for new notes.
+//
+// When content already has frontmatter:
+//   - If type is present → keep it (directive: don't overwrite caller-provided type)
+//   - If type is absent → inject type: Note
+//   - summary is always injected/updated
+//
+// When content has no frontmatter:
+//   - Synthesize one from okf fields (or defaults: type="Note", title from path)
+//
+// When content is empty:
+//   - Synthesize from okf fields via EmitFrontmatter (same as before, but with summary)
+//
+// Returns the content string with compliant frontmatter prepended when needed.
+func EnsureOKFFrontmatter(content, summary, path string, okfFields map[string]interface{}) string {
+	titleFromPath := filepath.Base(path)
+
+	if content == "" {
+		if okfFields == nil {
+			okfFields = make(map[string]interface{})
+		}
+		if _, ok := okfFields["type"]; !ok {
+			okfFields["type"] = okf.DefaultType
+		}
+		if _, ok := okfFields["title"]; !ok {
+			okfFields["title"] = titleFromPath
+		}
+		okfFields["summary"] = summary
+		return EmitFrontmatter(okfFields) + "\n"
+	}
+
+	frontmatter, bodyBytes := parseNote([]byte(content))
+	body := string(bodyBytes)
+	hasType := false
+	if frontmatter != nil {
+		if v, ok := frontmatter["type"]; ok {
+			if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
+				hasType = true
+			}
+		}
+	}
+
+	if frontmatter == nil {
+		frontmatter = make(map[string]interface{})
+	}
+	if !hasType {
+		frontmatter["type"] = okf.DefaultType
+	}
+	frontmatter["summary"] = summary
+	for k, v := range okfFields {
+		if _, exists := frontmatter[k]; !exists {
+			frontmatter[k] = v
+		}
+	}
+
+	return EmitFrontmatter(frontmatter) + "\n" + body
 }
 
 // TransitiveClosure performs a BFS over the vault's OKF link graph starting

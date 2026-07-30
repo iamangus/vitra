@@ -161,7 +161,7 @@ func (fs *FileSystem) HandleAPICreateNote(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	content := fmt.Sprintf("---\ntitle: %s\n---\n\n", filepath.Base(req.Path))
+	content := fmt.Sprintf("---\ntype: Note\ntitle: %s\n---\n\n", filepath.Base(req.Path))
 	if err := os.WriteFile(fullPath, []byte(content), 0644); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

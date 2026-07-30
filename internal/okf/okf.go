@@ -27,6 +27,7 @@ type Metadata struct {
 	Type        string   `json:"type"`
 	Title       string   `json:"title,omitempty"`
 	Description string   `json:"description,omitempty"`
+	Summary     string   `json:"summary,omitempty"`
 	Resource    string   `json:"resource,omitempty"`
 	Tags        []string `json:"tags,omitempty"`
 	Timestamp   string   `json:"timestamp,omitempty"`
@@ -55,6 +56,11 @@ func Extract(frontmatter map[string]interface{}) Metadata {
 	if v, ok := frontmatter["description"]; ok {
 		if s, ok := v.(string); ok {
 			m.Description = s
+		}
+	}
+	if v, ok := frontmatter["summary"]; ok {
+		if s, ok := v.(string); ok {
+			m.Summary = s
 		}
 	}
 	if v, ok := frontmatter["resource"]; ok {

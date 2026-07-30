@@ -36,9 +36,14 @@ func NewToolsServer(fs *internal.FileSystem, skillsDirName string) *server.Strea
 	), handleWriteNote(fs))
 
 	s.AddTool(mcp.NewTool("create_note",
-		mcp.WithDescription("Create a new note (fails if it already exists)"),
+		mcp.WithDescription("Create a new note (fails if it already exists). "+
+			"Notes follow OKF conventions: every note has frontmatter with a `type` field (defaults to \"Note\"). "+
+			"Provide a concise `summary` of what the note contains — it is embedded for vector search. "+
+			"Set `tags` as a comma-separated list to enable semantic search filtering."),
 		mcp.WithString("path", mcp.Required(), mcp.Description("Vault-relative path to the note (without .md extension)")),
+		mcp.WithString("summary", mcp.Required(), mcp.Description("A one-line summary of what this note contains (improves semantic search)")),
 		mcp.WithString("content", mcp.Description("Optional initial content (defaults to frontmatter with title)")),
+		mcp.WithObject("okf", mcp.Description("Optional OKF frontmatter fields (title, type, tags, description)")),
 	), handleCreateNote(fs))
 
 	s.AddTool(mcp.NewTool("delete_note",
@@ -172,36 +177,20 @@ func handleCreateNote(fs *internal.FileSystem) func(context.Context, mcp.CallToo
 		if path == "" {
 			return nil, fmt.Errorf("path is required")
 		}
-		okfType := req.GetString("type", "")
-		okfTitle := req.GetString("title", "")
-		okfDesc := req.GetString("description", "")
-		okfResource := req.GetString("resource", "")
-		okfTags := req.GetString("tags", "")
-		content := req.GetString("content", "")
-		if content == "" && (okfType != "" || okfTitle != "" || okfDesc != "" || okfResource != "" || okfTags != "") {
-			fm := map[string]interface{}{}
-			if okfType == "" {
-				okfType = "Note"
-			}
-			fm["type"] = okfType
-			if okfTitle != "" {
-				fm["title"] = okfTitle
-			}
-			if okfDesc != "" {
-				fm["description"] = okfDesc
-			}
-			if okfResource != "" {
-				fm["resource"] = okfResource
-			}
-			if okfTags != "" {
-				tags := strings.Split(okfTags, ",")
-				for i, t := range tags {
-					tags[i] = strings.TrimSpace(t)
-				}
-				fm["tags"] = tags
-			}
-			content = internal.EmitFrontmatter(fm) + "\n"
+		summary := req.GetString("summary", "")
+		if summary == "" {
+			return nil, fmt.Errorf("summary is required")
 		}
+		content := req.GetString("content", "")
+
+		var okfFields map[string]interface{}
+		if raw, ok := req.GetArguments()["okf"]; ok && raw != nil {
+			if obj, ok := raw.(map[string]interface{}); ok {
+				okfFields = obj
+			}
+		}
+
+		content = internal.EnsureOKFFrontmatter(content, summary, path, okfFields)
 		if err := fs.CreateNote(path, content); err != nil {
 			return nil, err
 		}
