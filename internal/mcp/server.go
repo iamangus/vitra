@@ -185,8 +185,15 @@ func handleCreateNote(fs *internal.FileSystem) func(context.Context, mcp.CallToo
 
 		var okfFields map[string]interface{}
 		if raw, ok := req.GetArguments()["okf"]; ok && raw != nil {
-			if obj, ok := raw.(map[string]interface{}); ok {
-				okfFields = obj
+			switch v := raw.(type) {
+			case map[string]interface{}:
+				okfFields = v
+			case string:
+				if v != "" {
+					if err := json.Unmarshal([]byte(v), &okfFields); err != nil {
+						return nil, fmt.Errorf("okf must be a JSON object, got: %s", v)
+					}
+				}
 			}
 		}
 
