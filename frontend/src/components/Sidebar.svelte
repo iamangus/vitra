@@ -20,6 +20,7 @@
   let isResizing = false;
   let liveTreeReloadTimeout;
   let activeTab = 'files';
+  let dragOverRoot = false;
 
   async function loadTree() {
     try {
@@ -137,6 +138,45 @@
     closeContextMenu();
   }
 
+  async function doMove(oldPath, newPath) {
+    try {
+      await fileOps.rename(oldPath, newPath);
+      await loadTree();
+    } catch (e) {
+      alert('Failed to move: ' + e.message);
+    }
+  }
+
+  function handleMoveEvent(e) {
+    const { oldPath, newPath } = e.detail;
+    doMove(oldPath, newPath);
+  }
+
+  function handleRootDragOver(e) {
+    const sourcePath = e.dataTransfer.getData('text/plain');
+    if (!sourcePath) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    dragOverRoot = true;
+  }
+
+  function handleRootDragLeave(e) {
+    if (e.currentTarget.contains(e.relatedTarget)) return;
+    dragOverRoot = false;
+  }
+
+  function handleRootDrop(e) {
+    e.preventDefault();
+    dragOverRoot = false;
+    const sourcePath = e.dataTransfer.getData('text/plain');
+    if (!sourcePath) return;
+
+    const sourceName = sourcePath.split('/').pop();
+    if (sourcePath === sourceName) return;
+
+    doMove(sourcePath, sourceName);
+  }
+
   $: isCollapsed = !sidebarOpen;
 
   onMount(() => {
@@ -219,8 +259,16 @@
 
   <!-- File Tree -->
   {#if activeTab === 'files'}
-    <div class="file-tree" on:contextmenu={handleContextMenu}>
-      <FileTree nodes={treeData} {activePath} on:navigate />
+    <div
+      class="file-tree"
+      class:drag-over-root={dragOverRoot}
+      role="tree"
+      on:contextmenu={handleContextMenu}
+      on:dragover={handleRootDragOver}
+      on:dragleave={handleRootDragLeave}
+      on:drop={handleRootDrop}
+    >
+      <FileTree nodes={treeData} {activePath} on:navigate on:move={handleMoveEvent} />
     </div>
   {:else}
     <Activity />
@@ -406,6 +454,11 @@
     flex: 1;
     overflow-y: auto;
     padding: 0.5rem;
+  }
+
+  .file-tree.drag-over-root {
+    outline: 2px dashed var(--primary);
+    outline-offset: -2px;
   }
 
   .sidebar-tabs {
