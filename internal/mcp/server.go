@@ -73,8 +73,8 @@ func NewToolsServer(fs *internal.FileSystem, skillsDirName string) *server.Strea
 	), handleCreateFolder(fs))
 
 	s.AddTool(mcp.NewTool("search_wiki",
-		mcp.WithDescription("Semantic search across the vault using vector similarity"),
-		mcp.WithString("query", mcp.Required(), mcp.Description("Search query")),
+		mcp.WithDescription("Semantic search across the vault using vector similarity. Best results come from including specific technical terms, project names, or concepts in the query (e.g., 'Go embed Svelte SPA' not 'how do I build a website'). Prefer multiple targeted queries with different phrasings over a single conversational one."),
+		mcp.WithString("query", mcp.Required(), mcp.Description("Search query — use specific technical terms and concepts")),
 		mcp.WithNumber("limit", mcp.Description("Maximum number of results (default: 5)")),
 	), handleSearchWiki(fs))
 

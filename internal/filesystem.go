@@ -21,6 +21,8 @@ type FileSystem struct {
 	live         *LiveSync
 	index        *VaultIndex
 	skillsDirRel string
+	chunkSize    int
+	chunkOverlap int
 }
 
 func NewFileSystem(vaultPath string) *FileSystem {
@@ -33,6 +35,13 @@ func NewFileSystem(vaultPath string) *FileSystem {
 // SetVectorStore attaches a vector store so that note mutations are auto-indexed.
 func (fs *FileSystem) SetVectorStore(store vector.VectorStore) {
 	fs.VectorStore = store
+}
+
+// SetChunkConfig overrides the default note chunking parameters. Pass 0 to
+// keep the hardcoded defaults (1000 chars chunk, 200 chars overlap).
+func (fs *FileSystem) SetChunkConfig(chunkSize, chunkOverlap int) {
+	fs.chunkSize = chunkSize
+	fs.chunkOverlap = chunkOverlap
 }
 
 func (fs *FileSystem) SetSkillsDir(rel string) {
@@ -377,9 +386,13 @@ func (fs *FileSystem) ReindexVault(ctx context.Context) (int, error) {
 		if err != nil {
 			return nil
 		}
-		chunks := vector.ChunkNote(rel, string(content), 0, 0)
 		frontmatter, _ := parseNote(content)
+		title := ""
+		if t, ok := frontmatter["title"].(string); ok {
+			title = t
+		}
 		meta := okf.Extract(frontmatter)
+		chunks := vector.ChunkNote(rel, string(content), fs.chunkSize, fs.chunkOverlap, title)
 		for i := range chunks {
 			chunks[i].Type = meta.Type
 			chunks[i].Tags = meta.Tags
@@ -401,9 +414,13 @@ func (fs *FileSystem) autoIndex(path, content string) {
 	if fs.VectorStore == nil || fs.isSkillsPath(path) {
 		return
 	}
-	chunks := vector.ChunkNote(path, content, 0, 0)
 	frontmatter, _ := parseNote([]byte(content))
+	title := ""
+	if t, ok := frontmatter["title"].(string); ok {
+		title = t
+	}
 	meta := okf.Extract(frontmatter)
+	chunks := vector.ChunkNote(path, content, fs.chunkSize, fs.chunkOverlap, title)
 	for i := range chunks {
 		chunks[i].Type = meta.Type
 		chunks[i].Tags = meta.Tags

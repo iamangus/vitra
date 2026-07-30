@@ -3,8 +3,10 @@ package vector
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -137,21 +139,51 @@ func (c *ChromemStore) DeleteNote(ctx context.Context, path string) error {
 	return nil
 }
 
-// SemanticSearch embeds the query and returns the nearest chunks.
+// SemanticSearch embeds the query, retrieves an expanded candidate set from
+// chromem, applies keyword boosting to bridge vocabulary gaps between the
+// query and note text, then returns the top N re-ranked results.
 func (c *ChromemStore) SemanticSearch(ctx context.Context, query string, limit int, filter Filter) ([]SearchResult, error) {
 	if limit <= 0 {
 		limit = 5
 	}
+
 	emb, err := c.embedder.EmbedText(query)
 	if err != nil {
 		return nil, fmt.Errorf("embed query: %w", err)
 	}
+
 	where := buildWhere(filter)
-	results, err := c.coll.QueryEmbedding(ctx, emb, limit, where, nil)
+
+	// Fetch more candidates than needed so re-ranking has room to work.
+	fetchLimit := limit * 4
+	if fetchLimit < 20 {
+		fetchLimit = 20
+	}
+
+	results, err := c.coll.QueryEmbedding(ctx, emb, fetchLimit, where, nil)
 	if err != nil {
 		return nil, err
 	}
-	return c.toSearchResults(results), nil
+
+	searchResults := c.toSearchResults(results)
+
+	// Keyword boosting: adjust distance scores based on literal keyword overlap.
+	// Disabled when HYBRID_BOOST_FACTOR is 0 or unset.
+	if bf := hybridBoostFactor(); bf > 0 {
+		keywords := extractKeywords(query)
+		if len(keywords) > 0 {
+			applyKeywordBoost(searchResults, keywords, bf)
+			sort.Slice(searchResults, func(i, j int) bool {
+				return searchResults[i].Distance < searchResults[j].Distance
+			})
+		}
+	}
+
+	if len(searchResults) > limit {
+		searchResults = searchResults[:limit]
+	}
+
+	return searchResults, nil
 }
 
 // FindSimilarFiles returns notes semantically similar to the given path,
@@ -308,4 +340,64 @@ func getTitleFromPath(path string) string {
 		return path
 	}
 	return parts[len(parts)-1]
+}
+
+var stopWords = map[string]bool{
+	"a": true, "an": true, "the": true, "is": true, "are": true, "was": true, "were": true,
+	"in": true, "on": true, "at": true, "to": true, "for": true, "of": true, "with": true,
+	"and": true, "or": true, "but": true, "not": true, "it": true, "this": true, "that": true,
+	"be": true, "how": true, "what": true, "when": true, "where": true, "who": true, "why": true,
+	"do": true, "does": true, "did": true, "can": true, "will": true, "would": true,
+	"could": true, "should": true, "may": true, "might": true, "has": true, "have": true,
+	"had": true, "been": true, "being": true, "our": true, "my": true, "your": true,
+	"their": true, "we": true, "you": true, "us": true, "them": true, "me": true,
+	"him": true, "her": true, "its": true, "by": true, "from": true, "than": true,
+	"into": true, "up": true, "out": true, "i": true, "he": true, "she": true,
+	"they": true, "more": true, "no": true, "just": true, "so": true, "if": true,
+	"as": true, "also": true, "about": true, "over": true, "only": true, "very": true,
+}
+
+func extractKeywords(query string) []string {
+	seen := make(map[string]bool)
+	var keywords []string
+	for _, word := range strings.Fields(strings.ToLower(query)) {
+		word = strings.Trim(word, `"'.,;:!?()[]{}`)
+		if len(word) < 2 || stopWords[word] {
+			continue
+		}
+		if seen[word] {
+			continue
+		}
+		seen[word] = true
+		keywords = append(keywords, word)
+	}
+	return keywords
+}
+
+func applyKeywordBoost(results []SearchResult, keywords []string, boostFactor float64) {
+	for i := range results {
+		chunkLower := strings.ToLower(results[i].Chunk)
+		titleLower := strings.ToLower(results[i].Title)
+		var matches float64
+		for _, kw := range keywords {
+			if strings.Contains(chunkLower, kw) || strings.Contains(titleLower, kw) {
+				matches++
+			}
+		}
+		if len(keywords) > 0 && matches > 0 {
+			keywordScore := matches / float64(len(keywords))
+			similarity := 1.0 - float64(results[i].Distance)
+			boostedSim := similarity * (1.0 + boostFactor*keywordScore)
+			results[i].Distance = float32(math.Max(0.0, 1.0-boostedSim))
+		}
+	}
+}
+
+func hybridBoostFactor() float64 {
+	if v := os.Getenv("HYBRID_BOOST_FACTOR"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f
+		}
+	}
+	return 0.2
 }

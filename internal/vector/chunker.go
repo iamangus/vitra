@@ -22,13 +22,17 @@ const (
 	defaultChunkOverlap = 200
 )
 
-// ChunkNote splits a markdown note into smart chunks with metadata injection
-func ChunkNote(path string, content string, chunkSize int, chunkOverlap int) []Chunk {
+// ChunkNote splits a markdown note into smart chunks with metadata injection.
+// title is embedded into every chunk's text so it contributes to vector search.
+func ChunkNote(path string, content string, chunkSize int, chunkOverlap int, title string) []Chunk {
 	if chunkSize <= 0 {
 		chunkSize = defaultChunkSize
 	}
 	if chunkOverlap <= 0 {
 		chunkOverlap = defaultChunkOverlap
+	}
+	if title == "" {
+		title = getTitleFromPath(path)
 	}
 
 	// Remove frontmatter
@@ -78,8 +82,9 @@ func ChunkNote(path string, content string, chunkSize int, chunkOverlap int) []C
 			heading = strings.Join(headingStack, " > ")
 		}
 
-		// Inject metadata into text for embedding
-		enhancedText := fmt.Sprintf("File: %s | Section: %s | %s", path, heading, text)
+		// Inject metadata into text for embedding — title contributes vocabulary
+		// to the embedding space (e.g., "SPA Pattern" = "web UI methodology")
+		enhancedText := fmt.Sprintf("Note: %s | File: %s | Section: %s | %s", title, path, heading, text)
 
 		chunks = append(chunks, Chunk{
 			Text:    enhancedText,

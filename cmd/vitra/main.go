@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -52,14 +53,26 @@ func env(key, def string) string {
 	return def
 }
 
+func intEnv(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return def
+}
+
 func main() {
 	vaultPath := env("VAULT_PATH", "./vault")
 	port := env("PORT", "8080")
 	skillsDirName := env("SKILLS_DIR_NAME", "skills")
 	chromemPath := env("CHROMEM_PATH", filepath.Join(vaultPath, ".chromem"))
+	chunkSize := intEnv("CHUNK_SIZE", 0)
+	chunkOverlap := intEnv("CHUNK_OVERLAP", 0)
 
 	fs := internal.NewFileSystem(vaultPath)
 	fs.SetSkillsDir(skillsDirName)
+	fs.SetChunkConfig(chunkSize, chunkOverlap)
 	if err := fs.BuildIndex(); err != nil {
 		log.Fatalf("failed to build vault index: %v", err)
 	}
