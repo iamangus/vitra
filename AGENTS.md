@@ -61,7 +61,7 @@ cd frontend && npm run build   # frontend must build
 │   ├── markdown.go           # goldmark rendering with WikiLinks + frontmatter parser
 │   ├── live.go               # SSE live updates + fsnotify watcher
 │   ├── mcp/
-│   │   └── server.go         # MCP server (19 tools: vault + OKF + list_skills)
+│   │   └── server.go         # MCP server (18 tools: vault + OKF)
 │   ├── okf/
 │   │   └── okf.go            # OKF helpers: Extract, IsReservedFilename, ExtractOKFLinks, ParseLogEntries
 │   └── vector/
@@ -75,7 +75,6 @@ cd frontend && npm run build   # frontend must build
 │   │   ├── components/Search.svelte   # Full-text / Semantic toggle
 │   │   └── lib/api.js                 # API client (incl. search.semantic)
 │   └── dist/                 # Built frontend (embedded via //go:embed)
-├── skills/                   # Example skill markdown files
 ├── Dockerfile                # Multi-stage: node → go → alpine
 ├── docker-compose.yml        # Single-service vitra (no chromadb)
 └── .air.toml
@@ -110,6 +109,7 @@ cd frontend && npm run build   # frontend must build
 - `GET  /api/concepts/closure?path=...&depth=N` — transitive closure of link graph
 - `GET  /api/activity?path=...&limit=...` — aggregated log.md activity feed
 - `PATCH /api/note/{path}` — merge frontmatter updates (preserves body)
+- `GET  /api/skills` — skill metadata `[{name, title, description, tags, path, size, mtime}]` (for system-prompt inclusion)
 
 ### MCP (at /mcp on web port)
 Streamable HTTP at `http://localhost:8080/mcp`. Tools:
@@ -122,14 +122,23 @@ Streamable HTTP at `http://localhost:8080/mcp`. Tools:
 **OKF-aware (Scope D)** (5): `list_concepts`, `get_linked_concepts`,
 `get_transitive_closure`, `update_note`, `get_index`.
 
-**Skills** (1): `list_skills` — returns `[{name, title, description, path, type, tags}]`
-for each `*.md` in `skills/`. Use `read_note(path="skills/<name>")` to fetch
-full skill content.
-
-## Skills convention
+## Skills
 
 Skill markdown files live in the vault under `SKILLS_DIR_NAME` (default
-`skills`). Frontmatter (OKF v0.1):
+`skills`). They are ordinary OKF notes and are **managed with the same MCP note
+tools** (`read_note`, `write_note`, `create_note`, `update_note`,
+`delete_note`), addressing them by their vault-relative path, e.g.
+`read_note(path="skills/my_skill")`.
+
+Discovery is via `GET /api/skills`, which returns metadata-only for each
+`*.md` in `skills/`:
+
+```json
+[{ "name": "my_skill", "title": "my_skill", "description": "...",
+   "tags": ["example"], "path": "skills/my_skill", "size": 123, "mtime": "..." }]
+```
+
+Frontmatter (OKF v0.1):
 
 ```markdown
 ---
@@ -141,12 +150,9 @@ tags: [example, demo]
 
 # Skill body
 
-The skill content — use read_note to fetch it.
+The skill content — read it with read_note.
 ```
 
-`title` is the primary tool identifier; `name` is used as fallback. If both are
-absent the filename (sanitized) is used. Skills are excluded from the OKF
-catalog (concepts, graph, activity, semantic index, vault index). The skills
-directory is also excluded from the sidebar file tree.
-
-`type` is OKF canonical (`Skill`, capitalized).
+Skills are excluded from the OKF catalog (concepts, graph, activity, semantic
+index, vault index) and from the sidebar file tree. `type` is OKF canonical
+(`Skill`, capitalized).

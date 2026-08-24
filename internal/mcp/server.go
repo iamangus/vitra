@@ -17,7 +17,7 @@ import (
 // NewToolsServer creates the tools MCP server, exposing the vault file
 // operations plus the semantic vector tools. Returns the streamable HTTP
 // handler to be mounted on the web mux (e.g. at /mcp).
-func NewToolsServer(fs *internal.FileSystem, skillsDirName string) *server.StreamableHTTPServer {
+func NewToolsServer(fs *internal.FileSystem) *server.StreamableHTTPServer {
 	s := server.NewMCPServer(
 		"vitra-tools",
 		"1.0.0",
@@ -25,29 +25,30 @@ func NewToolsServer(fs *internal.FileSystem, skillsDirName string) *server.Strea
 	)
 
 	s.AddTool(mcp.NewTool("read_note",
-		mcp.WithDescription("Read a note from the vault"),
-		mcp.WithString("path", mcp.Required(), mcp.Description("Vault-relative path to the note (without .md extension)")),
+		mcp.WithDescription("Read a note or skill from the vault. Skills live in the `skills/` directory and are addressed as `skills/<name>` (list them via GET /api/skills)."),
+		mcp.WithString("path", mcp.Required(), mcp.Description("Vault-relative path to the note or skill (without .md extension)")),
 	), handleReadNote(fs))
 
 	s.AddTool(mcp.NewTool("write_note",
-		mcp.WithDescription("Write or overwrite a note in the vault"),
-		mcp.WithString("path", mcp.Required(), mcp.Description("Vault-relative path to the note (without .md extension)")),
-		mcp.WithString("content", mcp.Required(), mcp.Description("Full markdown content of the note")),
+		mcp.WithDescription("Write or overwrite a note or skill in the vault"),
+		mcp.WithString("path", mcp.Required(), mcp.Description("Vault-relative path to the note or skill (without .md extension)")),
+		mcp.WithString("content", mcp.Required(), mcp.Description("Full markdown content of the note or skill")),
 	), handleWriteNote(fs))
 
 	s.AddTool(mcp.NewTool("create_note",
 		mcp.WithDescription("Create a new note (fails if it already exists). "+
 			"Notes follow OKF conventions: every note has frontmatter with a `type` field (defaults to \"Note\"). "+
+			"Create skills under `skills/` with `type: Skill`. "+
 			"Provide a concise `summary` of what the note contains — it is embedded for vector search. "+
 			"Set `tags` as a comma-separated list to enable semantic search filtering."),
-		mcp.WithString("path", mcp.Required(), mcp.Description("Vault-relative path to the note (without .md extension)")),
+		mcp.WithString("path", mcp.Required(), mcp.Description("Vault-relative path to the note or skill (without .md extension)")),
 		mcp.WithString("summary", mcp.Required(), mcp.Description("A one-line summary of what this note contains (improves semantic search)")),
 		mcp.WithString("content", mcp.Description("Optional initial content (defaults to frontmatter with title)")),
 		mcp.WithObject("okf", mcp.Description("Optional OKF frontmatter fields (title, type, tags, description)")),
 	), handleCreateNote(fs))
 
 	s.AddTool(mcp.NewTool("delete_note",
-		mcp.WithDescription("Delete a note or folder from the vault"),
+		mcp.WithDescription("Delete a note or skill from the vault"),
 		mcp.WithString("path", mcp.Required(), mcp.Description("Vault-relative path to delete")),
 	), handleDeleteNote(fs))
 
@@ -122,8 +123,8 @@ func NewToolsServer(fs *internal.FileSystem, skillsDirName string) *server.Strea
 	), handleGetTransitiveClosure(fs))
 
 	s.AddTool(mcp.NewTool("update_note",
-		mcp.WithDescription("Merge frontmatter updates into an existing note, preserving the body and auto-touching `timestamp` unless supplied"),
-		mcp.WithString("path", mcp.Required(), mcp.Description("Vault-relative path to the note (without .md extension)")),
+		mcp.WithDescription("Merge frontmatter updates into an existing note or skill, preserving the body and auto-touching `timestamp` unless supplied"),
+		mcp.WithString("path", mcp.Required(), mcp.Description("Vault-relative path to the note or skill (without .md extension)")),
 		mcp.WithObject("frontmatter", mcp.Description("Key/value map of frontmatter fields to merge (overwrites existing keys)")),
 	), handleUpdateNote(fs))
 
@@ -131,10 +132,6 @@ func NewToolsServer(fs *internal.FileSystem, skillsDirName string) *server.Strea
 		mcp.WithDescription("Read a directory's index.md; synthesize one from the folder's concepts when absent (spec §6 permits)"),
 		mcp.WithString("path", mcp.Description("Vault-relative directory path (defaults to vault root)")),
 	), handleGetIndex(fs))
-
-	s.AddTool(mcp.NewTool("list_skills",
-		mcp.WithDescription("List available skills from the skills directory. Each skill is an OKF markdown file with frontmatter (title, description, type, tags). Use read_note to read the full skill content."),
-	), handleListSkills(fs, skillsDirName))
 
 	return server.NewStreamableHTTPServer(s)
 }
@@ -515,146 +512,4 @@ func handleGetIndex(fs *internal.FileSystem) func(context.Context, mcp.CallToolR
 		}
 		return mcp.NewToolResultText(sb.String()), nil
 	}
-}
-
-func handleListSkills(fs *internal.FileSystem, skillsDirName string) func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		skillsDir := filepath.Join(fs.VaultPath, skillsDirName)
-		entries, err := os.ReadDir(skillsDir)
-		if err != nil {
-			return mcp.NewToolResultText("[]"), nil
-		}
-		type SkillEntry struct {
-			Name        string   `json:"name"`
-			Title       string   `json:"title"`
-			Description string   `json:"description"`
-			Path        string   `json:"path"`
-			Type        string   `json:"type"`
-			Tags        []string `json:"tags,omitempty"`
-		}
-		var skills []SkillEntry
-		for _, entry := range entries {
-			name := entry.Name()
-			if entry.IsDir() || !strings.HasSuffix(name, ".md") {
-				continue
-			}
-			fullPath := filepath.Join(skillsDir, name)
-			content, err := os.ReadFile(fullPath)
-			if err != nil {
-				continue
-			}
-			fm, body := internal.ParseNote(content)
-			toolName := ""
-			if fm != nil {
-				if t, ok := fm["title"]; ok {
-					if s, ok := t.(string); ok {
-						toolName = s
-					}
-				}
-				if toolName == "" {
-					if n, ok := fm["name"]; ok {
-						if s, ok := n.(string); ok {
-							toolName = s
-						}
-					}
-				}
-			}
-			if toolName == "" {
-				toolName = sanitizeToolName(strings.TrimSuffix(name, ".md"))
-			}
-			if !isValidToolName(toolName) {
-				continue
-			}
-			description := ""
-			if fm != nil {
-				if d, ok := fm["description"]; ok {
-					if s, ok := d.(string); ok {
-						description = s
-					}
-				}
-			}
-			if description == "" {
-				description = firstNonEmptyParagraph(string(body))
-			}
-			relPath := skillsDirName + "/" + strings.TrimSuffix(name, ".md")
-			okfType := ""
-			okfTags := []string{}
-			if fm != nil {
-				if t, ok := fm["type"]; ok {
-					if s, ok := t.(string); ok {
-						okfType = s
-					}
-				}
-				if tags, ok := fm["tags"]; ok {
-					if tagStr, ok := tags.(string); ok && len(tagStr) > 0 {
-						tagStr = strings.Trim(tagStr, "[]")
-						for _, t := range strings.Split(tagStr, ",") {
-							if t = strings.TrimSpace(t); t != "" {
-								okfTags = append(okfTags, t)
-							}
-						}
-					}
-				}
-			}
-			skills = append(skills, SkillEntry{
-				Name:        toolName,
-				Title:       toolName,
-				Description: description,
-				Path:        relPath,
-				Type:        okfType,
-				Tags:        okfTags,
-			})
-		}
-		if skills == nil {
-			skills = []SkillEntry{}
-		}
-		data, _ := json.MarshalIndent(skills, "", "  ")
-		return mcp.NewToolResultText(string(data)), nil
-	}
-}
-
-func isValidToolName(name string) bool {
-	if len(name) == 0 {
-		return false
-	}
-	c := name[0]
-	if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c == '_') {
-		return false
-	}
-	for i := 1; i < len(name); i++ {
-		c := name[i]
-		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_') {
-			return false
-		}
-	}
-	return true
-}
-
-func sanitizeToolName(name string) string {
-	var b strings.Builder
-	name = strings.ToLower(name)
-	for i, r := range name {
-		if r >= 'a' && r <= 'z' || r == '_' || (i > 0 && r >= '0' && r <= '9') {
-			b.WriteRune(r)
-		} else {
-			b.WriteRune('_')
-		}
-	}
-	result := b.String()
-	if result == "" || (result[0] >= '0' && result[0] <= '9') {
-		return "skill"
-	}
-	return result
-}
-
-func firstNonEmptyParagraph(body string) string {
-	lines := strings.Split(strings.TrimSpace(body), "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		return line
-	}
-	return ""
 }
