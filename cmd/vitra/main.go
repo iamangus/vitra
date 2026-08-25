@@ -111,7 +111,6 @@ func main() {
 	mux.HandleFunc("GET /api/concepts/closure", fs.HandleAPIConceptClosure)
 	mux.HandleFunc("GET /api/activity", fs.HandleAPIActivity)
 	mux.HandleFunc("PATCH /api/note/{path...}", fs.HandleAPIPatchNote)
-	mux.HandleFunc("GET /api/skills", fs.HandleAPISkills)
 
 	mcpHandler := mcp.NewToolsServer(fs)
 	mux.Handle("/mcp", mcpHandler)

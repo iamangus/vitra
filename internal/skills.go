@@ -1,7 +1,6 @@
 package internal
 
 import (
-	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -9,8 +8,8 @@ import (
 )
 
 // SkillMeta is the metadata exposed for each skill in the vault's skills
-// directory via GET /api/skills. Path is the vault-relative path used to
-// address the skill with the note tools (e.g. read_note, write_note).
+// directory. Path is the vault-relative path used to address the skill with
+// the note tools (e.g. read_note, write_note).
 type SkillMeta struct {
 	Name        string   `json:"name"`
 	Title       string   `json:"title"`
@@ -79,17 +78,6 @@ func (fs *FileSystem) ListSkillMetadata() ([]SkillMeta, error) {
 	}
 	sort.Slice(skills, func(i, j int) bool { return skills[i].Name < skills[j].Name })
 	return skills, nil
-}
-
-// HandleAPISkills serves GET /api/skills: a JSON array of skill metadata.
-// Intended for deterministic, programmatic inclusion in system prompts.
-func (fs *FileSystem) HandleAPISkills(w http.ResponseWriter, r *http.Request) {
-	skills, err := fs.ListSkillMetadata()
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, skills)
 }
 
 func parseTags(v interface{}) []string {

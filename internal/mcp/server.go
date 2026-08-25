@@ -25,7 +25,7 @@ func NewToolsServer(fs *internal.FileSystem) *server.StreamableHTTPServer {
 	)
 
 	s.AddTool(mcp.NewTool("read_note",
-		mcp.WithDescription("Read a note or skill from the vault. Skills live in the `skills/` directory and are addressed as `skills/<name>` (list them via GET /api/skills)."),
+		mcp.WithDescription("Read a note or skill from the vault. Skills live in the `skills/` directory and are addressed as `skills/<name>` (discover them with list_skills)."),
 		mcp.WithString("path", mcp.Required(), mcp.Description("Vault-relative path to the note or skill (without .md extension)")),
 	), handleReadNote(fs))
 
@@ -132,6 +132,10 @@ func NewToolsServer(fs *internal.FileSystem) *server.StreamableHTTPServer {
 		mcp.WithDescription("Read a directory's index.md; synthesize one from the folder's concepts when absent (spec §6 permits)"),
 		mcp.WithString("path", mcp.Description("Vault-relative directory path (defaults to vault root)")),
 	), handleGetIndex(fs))
+
+	s.AddTool(mcp.NewTool("list_skills",
+		mcp.WithDescription("List skill metadata from the vault's skills directory. Each result includes a vault-relative path that can be used with the note tools to read or manage the skill."),
+	), handleListSkills(fs))
 
 	return server.NewStreamableHTTPServer(s)
 }
@@ -461,6 +465,20 @@ func handleUpdateNote(fs *internal.FileSystem) func(context.Context, mcp.CallToo
 			return nil, err
 		}
 		return mcp.NewToolResultText(fmt.Sprintf("Updated: %s", path)), nil
+	}
+}
+
+func handleListSkills(fs *internal.FileSystem) func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		skills, err := fs.ListSkillMetadata()
+		if err != nil {
+			return nil, err
+		}
+		data, err := json.MarshalIndent(skills, "", "  ")
+		if err != nil {
+			return nil, err
+		}
+		return mcp.NewToolResultText(string(data)), nil
 	}
 }
 

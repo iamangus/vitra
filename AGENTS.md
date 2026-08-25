@@ -109,7 +109,6 @@ cd frontend && npm run build   # frontend must build
 - `GET  /api/concepts/closure?path=...&depth=N` — transitive closure of link graph
 - `GET  /api/activity?path=...&limit=...` — aggregated log.md activity feed
 - `PATCH /api/note/{path}` — merge frontmatter updates (preserves body)
-- `GET  /api/skills` — skill metadata `[{name, title, description, tags, path, size, mtime}]` (for system-prompt inclusion)
 
 ### MCP (at /mcp on web port)
 Streamable HTTP at `http://localhost:8080/mcp`. Tools:
@@ -122,6 +121,9 @@ Streamable HTTP at `http://localhost:8080/mcp`. Tools:
 **OKF-aware (Scope D)** (5): `list_concepts`, `get_linked_concepts`,
 `get_transitive_closure`, `update_note`, `get_index`.
 
+**Skills** (1): `list_skills` — returns metadata for each skill, including its
+vault-relative `path` for use with the note tools.
+
 ## Skills
 
 Skill markdown files live in the vault under `SKILLS_DIR_NAME` (default
@@ -130,7 +132,7 @@ tools** (`read_note`, `write_note`, `create_note`, `update_note`,
 `delete_note`), addressing them by their vault-relative path, e.g.
 `read_note(path="skills/my_skill")`.
 
-Discovery is via `GET /api/skills`, which returns metadata-only for each
+Discovery is via `list_skills`, which returns metadata-only for each
 `*.md` in `skills/`:
 
 ```json
