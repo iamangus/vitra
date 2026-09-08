@@ -160,9 +160,12 @@ func (fs *FileSystem) CreateNote(path, content string) error {
 
 // DeleteNote deletes a note (path.md) or a folder at path, and removes it from the index.
 func (fs *FileSystem) DeleteNote(path string) error {
-	fullPath, err := safeVaultPath(fs.VaultPath, path)
+	fullPath, found, err := fs.resolveVaultPath(path)
 	if err != nil {
 		return fmt.Errorf("invalid path: %w", err)
+	}
+	if !found {
+		return fmt.Errorf("not found: %s", path)
 	}
 	info, statErr := os.Stat(fullPath)
 	if statErr != nil {
@@ -207,13 +210,22 @@ func (fs *FileSystem) DeleteNote(path string) error {
 
 // RenameNote renames or moves a note/folder and updates the index accordingly.
 func (fs *FileSystem) RenameNote(old, new string) error {
-	oldFull, err := safeVaultPath(fs.VaultPath, old)
+	oldFull, found, err := fs.resolveVaultPath(old)
 	if err != nil {
 		return fmt.Errorf("invalid old path: %w", err)
+	}
+	if !found {
+		return fmt.Errorf("not found: %s", old)
 	}
 	newFull, err := safeVaultPath(fs.VaultPath, new)
 	if err != nil {
 		return fmt.Errorf("invalid new path: %w", err)
+	}
+	if info, err := os.Stat(oldFull); err == nil && !info.IsDir() && !strings.HasSuffix(new, ".md") {
+		newFull, err = safeVaultPath(fs.VaultPath, new+".md")
+		if err != nil {
+			return fmt.Errorf("invalid new path: %w", err)
+		}
 	}
 	if err := os.Rename(oldFull, newFull); err != nil {
 		return err
@@ -227,7 +239,7 @@ func (fs *FileSystem) RenameNote(old, new string) error {
 	if fs.VectorStore != nil {
 		fs.autoDelete(relOld)
 		info, err := os.Stat(newFull)
-		if err == nil && !info.IsDir() && strings.HasSuffix(new, ".md") {
+		if err == nil && !info.IsDir() && strings.HasSuffix(newFull, ".md") {
 			if content, err := os.ReadFile(newFull); err == nil {
 				fs.autoIndex(relNew, string(bytes.TrimSpace(content)))
 			}

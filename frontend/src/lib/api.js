@@ -10,7 +10,9 @@ async function api(endpoint, options = {}) {
   });
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(text || `HTTP ${res.status}`);
+    const err = new Error(text || `HTTP ${res.status}`);
+    err.status = res.status;
+    throw err;
   }
   if (res.status === 204) return null;
   const contentType = res.headers.get('content-type');

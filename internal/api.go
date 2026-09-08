@@ -35,6 +35,26 @@ func safeVaultPath(vaultPath, input string) (string, error) {
 	return clean, nil
 }
 
+func (fs *FileSystem) resolveVaultPath(input string) (string, bool, error) {
+	exact, err := safeVaultPath(fs.VaultPath, input)
+	if err != nil {
+		return "", false, err
+	}
+	if _, err := os.Stat(exact); err == nil {
+		return exact, true, nil
+	}
+	if !strings.HasSuffix(input, ".md") {
+		withExt, err := safeVaultPath(fs.VaultPath, input+".md")
+		if err != nil {
+			return "", false, err
+		}
+		if _, err := os.Stat(withExt); err == nil {
+			return withExt, true, nil
+		}
+	}
+	return exact, false, nil
+}
+
 func (fs *FileSystem) HandleAPIFileTree(w http.ResponseWriter, r *http.Request) {
 	activePath := r.URL.Query().Get("active")
 	tree, err := fs.buildTree(fs.VaultPath, activePath, 0)
@@ -220,15 +240,26 @@ func (fs *FileSystem) HandleAPIRename(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	oldFull, err := safeVaultPath(fs.VaultPath, req.Old)
+	oldFull, found, err := fs.resolveVaultPath(req.Old)
 	if err != nil {
 		http.Error(w, "Invalid old path", http.StatusBadRequest)
+		return
+	}
+	if !found {
+		http.Error(w, "Not found", http.StatusNotFound)
 		return
 	}
 	newFull, err := safeVaultPath(fs.VaultPath, req.New)
 	if err != nil {
 		http.Error(w, "Invalid new path", http.StatusBadRequest)
 		return
+	}
+	if info, err := os.Stat(oldFull); err == nil && !info.IsDir() && !strings.HasSuffix(req.New, ".md") {
+		newFull, err = safeVaultPath(fs.VaultPath, req.New+".md")
+		if err != nil {
+			http.Error(w, "Invalid new path", http.StatusBadRequest)
+			return
+		}
 	}
 
 	if err := os.Rename(oldFull, newFull); err != nil {
@@ -244,7 +275,7 @@ func (fs *FileSystem) HandleAPIRename(w http.ResponseWriter, r *http.Request) {
 	if fs.VectorStore != nil {
 		fs.autoDelete(relOld)
 		info, err := os.Stat(newFull)
-		if err == nil && !info.IsDir() && strings.HasSuffix(req.New, ".md") {
+		if err == nil && !info.IsDir() && strings.HasSuffix(newFull, ".md") {
 			if content, err := os.ReadFile(newFull); err == nil {
 				fs.autoIndex(relNew, string(bytes.TrimSpace(content)))
 			}
@@ -274,9 +305,13 @@ func (fs *FileSystem) HandleAPIDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fullPath, err := safeVaultPath(fs.VaultPath, path)
+	fullPath, found, err := fs.resolveVaultPath(path)
 	if err != nil {
 		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+	if !found {
+		http.Error(w, "Not found", http.StatusNotFound)
 		return
 	}
 
@@ -317,9 +352,13 @@ func (fs *FileSystem) HandleAPIDownload(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	fullPath, err := safeVaultPath(fs.VaultPath, path+".md")
+	fullPath, found, err := fs.resolveVaultPath(path)
 	if err != nil {
 		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+	if !found {
+		http.Error(w, "Not found", http.StatusNotFound)
 		return
 	}
 

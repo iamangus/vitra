@@ -40,7 +40,7 @@
       isDirty = false;
       await loadBacklinks();
     } catch (e) {
-      if (e.message.includes('404')) {
+      if (e.status === 404) {
         note = { notFound: true, path: notePath };
         backlinks = [];
       } else {
