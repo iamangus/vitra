@@ -160,6 +160,16 @@ func (c *ChromemStore) SemanticSearch(ctx context.Context, query string, limit i
 		fetchLimit = 20
 	}
 
+	// chromem-go rejects nResults larger than the collection size, so every
+	// search would fail in a small (or empty) vault. Cap the candidate fetch
+	// to the number of indexed documents; an empty store yields no results.
+	if count := c.coll.Count(); count < fetchLimit {
+		fetchLimit = count
+	}
+	if fetchLimit <= 0 {
+		return nil, nil
+	}
+
 	results, err := c.coll.QueryEmbedding(ctx, emb, fetchLimit, where, nil)
 	if err != nil {
 		return nil, err

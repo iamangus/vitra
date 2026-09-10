@@ -1,6 +1,6 @@
 <script>
   import { createEventDispatcher, onMount } from 'svelte';
-  import { files, folders, fileOps } from '../lib/api.js';
+  import { files, folders, fileOps, notes } from '../lib/api.js';
   import { subscribeToLiveUpdates } from '../lib/live.js';
   import FileTree from './FileTree.svelte';
   import Activity from './Activity.svelte';
@@ -61,9 +61,22 @@
     window.removeEventListener('mouseup', stopResize);
   }
 
+  async function createAndNavigate(name) {
+    try {
+      await notes.create(name);
+    } catch (e) {
+      if (e.status !== 409) {
+        alert('Failed to create note: ' + e.message);
+        return;
+      }
+    }
+    await loadTree();
+    dispatch('navigate', name);
+  }
+
   function handleNewNote() {
     const name = prompt('New note name:');
-    if (name) dispatch('navigate', name);
+    if (name) createAndNavigate(name);
   }
 
   async function handleCreateFolder() {
@@ -127,7 +140,7 @@
     const name = prompt('New note name:');
     if (name) {
       const fullPath = folder ? folder + '/' + name : name;
-      dispatch('navigate', fullPath);
+      await createAndNavigate(fullPath);
     }
     closeContextMenu();
   }

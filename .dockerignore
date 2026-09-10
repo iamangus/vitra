@@ -1,0 +1,9 @@
+.git
+.github
+tmp
+vault
+.air.toml
+frontend/node_modules
+frontend/dist
+docker-compose.yml
+.env

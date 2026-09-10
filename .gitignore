@@ -40,3 +40,6 @@ frontend/dist/
 *.test
 *.out
 coverage.*
+
+# Playwright MCP test artifacts
+.playwright-mcp/
