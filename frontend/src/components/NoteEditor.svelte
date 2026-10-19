@@ -3,6 +3,7 @@
   import { notes, backlinks as backlinksApi } from '../lib/api.js';
   import { subscribeToLiveUpdates } from '../lib/live.js';
   import Backlinks from './Backlinks.svelte';
+  import { getDraft, discardDraft } from '../lib/drafts.js';
 
   const dispatch = createEventDispatcher();
 
@@ -22,36 +23,65 @@
   let liveBacklinksRefreshTimeout;
   let isDirty = false;
   let suppressLiveReloadUntil = 0;
+  let draft;
+  let unsubscribeDraft;
+  let loadController;
+  let previewController;
+  let loadGeneration = 0;
+  let loadError = '';
+  let saveError = false;
 
   $: loadNote(path);
 
-  async function loadNote(notePath, options = {}) {
+  async function loadNote(notePath, options = { preserveMode: false }) {
     if (!notePath) return;
-
+    if (options.preserveMode && draft?.dirty()) return;
+    const generation = ++loadGeneration;
+    loadController?.abort();
+    loadController = new AbortController();
+    if (draft?.state.path !== notePath) {
+      draft?.flush();
+      unsubscribeDraft?.();
+      note = null;
+    }
+    loadError = '';
     const { preserveMode = false } = options;
 
     try {
-      note = await notes.get(notePath);
-      content = note.content;
+      const loaded = await notes.get(notePath, loadController.signal);
+      if (generation !== loadGeneration) return;
+      note = loaded;
+      draft = getDraft(notePath, loaded);
+      unsubscribeDraft?.();
+      unsubscribeDraft = draft.subscribe(state => {
+        content = state.content;
+        saveStatus = state.status;
+        isDirty = draft.dirty();
+        saveError = Boolean(state.error);
+      });
       html = note.html;
       if (!preserveMode) {
         mode = localStorage.getItem('noteMode') || 'view';
       }
-      isDirty = false;
+      if (isDirty) updatePreview();
       await loadBacklinks();
     } catch (e) {
-      if (e.message.includes('404')) {
+      if (generation !== loadGeneration || e.name === 'AbortError') return;
+      if (e.status === 404) {
         note = { notFound: true, path: notePath };
         backlinks = [];
       } else {
+        loadError = e.message;
         console.error('Failed to load note:', e);
       }
     }
   }
 
   async function loadBacklinks() {
+    const notePath = path;
     try {
-      backlinks = await backlinksApi.get(path);
+      const result = await backlinksApi.get(notePath);
+      if (path === notePath) backlinks = result;
     } catch (e) {
       backlinks = [];
     }
@@ -66,25 +96,7 @@
   }
 
   function handleContentChange() {
-    isDirty = true;
-    saveStatus = 'Saving...';
-    clearTimeout(saveTimeout);
-    saveTimeout = setTimeout(async () => {
-      const contentToSave = content;
-      try {
-        await notes.save(path, contentToSave);
-        suppressLiveReloadUntil = Date.now() + 1500;
-        if (content === contentToSave) {
-          isDirty = false;
-        }
-        saveStatus = 'Saved';
-        await loadBacklinks();
-        setTimeout(() => saveStatus = '', 2000);
-      } catch (e) {
-        console.error('Save failed:', e);
-        saveStatus = 'Save error';
-      }
-    }, 500);
+    draft.edit(content);
 
     if (mode === 'split' || mode === 'view') {
       clearTimeout(previewTimeout);
@@ -93,10 +105,34 @@
   }
 
   async function updatePreview() {
+    const notePath = path;
+    const text = content;
+    previewController?.abort();
+    const controller = new AbortController();
+    previewController = controller;
     try {
-      html = await notes.preview(path, content);
+      const result = await notes.preview(notePath, text, controller.signal);
+      if (path === notePath && content === text && !controller.signal.aborted) html = result;
     } catch (e) {
       console.error('Preview failed:', e);
+    }
+  }
+
+  function reloadFromDisk() {
+    if (!confirm('Discard this local draft and reload the saved note?')) return;
+    discardDraft(path);
+    unsubscribeDraft?.();
+    draft = null;
+    loadNote(path, { preserveMode: true });
+  }
+
+  function handlePreviewClick(event) {
+    const anchor = event.target.closest('a');
+    if (!anchor || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+    const url = new URL(anchor.href, window.location.href);
+    if (url.origin === window.location.origin && url.pathname.startsWith('/note/')) {
+      event.preventDefault();
+      dispatch('navigate', decodeURIComponent(url.pathname.slice(6)));
     }
   }
 
@@ -119,7 +155,7 @@
       isResizing = false;
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
-      localStorage.setItem('splitRatio', editWidthPercent);
+      localStorage.setItem('splitRatio', String(editWidthPercent));
       document.removeEventListener('mousemove', onMouseMove);
       document.removeEventListener('mouseup', onMouseUp);
     }
@@ -203,6 +239,10 @@
     });
 
     return () => {
+      draft?.flush();
+      unsubscribeDraft?.();
+      loadController?.abort();
+      previewController?.abort();
       clearTimeout(saveTimeout);
       clearTimeout(previewTimeout);
       clearTimeout(liveNoteRefreshTimeout);
@@ -212,7 +252,9 @@
   });
 </script>
 
-{#if note?.notFound}
+{#if loadError}
+  <div class="not-found" role="alert"><p>{loadError}</p><button on:click={() => loadNote(path)}>Retry</button></div>
+{:else if note?.notFound}
   <div class="not-found">
     <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="opacity-40">
       <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/>
@@ -236,7 +278,11 @@
           <span class="current">{note.title}</span>
         </nav>
         {#if saveStatus}
-          <span class="save-status">{saveStatus}</span>
+          <span class="save-status" role="status">{saveStatus}</span>
+          {#if saveError}
+            <button on:click={() => draft.flush()}>Retry save</button>
+            <button on:click={reloadFromDisk}>Discard draft and reload</button>
+          {/if}
         {/if}
       </div>
       <div class="header-right">
@@ -256,23 +302,19 @@
     <div class="content-area" id="note-content-area">
       {#if mode !== 'view'}
         <div class="edit-pane" style="width: {mode === 'split' ? editWidthPercent + '%' : '100%'};">
-          <textarea bind:value={content} on:input={handleContentChange}></textarea>
+          <textarea aria-label="Note markdown" bind:value={content} on:input={handleContentChange}></textarea>
         </div>
       {/if}
 
       {#if mode === 'split'}
-        <div class="divider" on:mousedown={startResize} role="separator" aria-label="Resize panes">
-          <div class="divider-handle">
-            <div class="dot"></div>
-            <div class="dot"></div>
-            <div class="dot"></div>
-          </div>
-        </div>
+        <button type="button" class="divider" on:mousedown={startResize} on:keydown={event => { if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); editWidthPercent = Math.max(20, Math.min(80, editWidthPercent + (event.key === 'ArrowRight' ? 5 : -5))); } }} role="slider" aria-orientation="horizontal" aria-valuenow={editWidthPercent} aria-valuemin="20" aria-valuemax="80" aria-label="Resize panes">
+          <span class="divider-handle"><span class="dot"></span><span class="dot"></span><span class="dot"></span></span>
+        </button>
       {/if}
 
       {#if mode !== 'edit'}
         <div class="preview-pane">
-          <div class="markdown-content">
+          <div class="markdown-content" role="presentation" on:click={handlePreviewClick}>
             {@html html}
             <Backlinks {backlinks} on:navigate />
           </div>
@@ -419,6 +461,8 @@
   }
 
   .divider {
+    border: 0;
+    padding: 0;
     width: 4px;
     cursor: col-resize;
     background: transparent;

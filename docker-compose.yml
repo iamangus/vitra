@@ -1,21 +1,23 @@
-version: '3.8'
-
 services:
   vitra:
     build: .
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     volumes:
-      - nfs-vault:/vault
+      - vault:/data/vault
+      - index:/data/index
     environment:
-      - VAULT_PATH=/vault
-      - PORT=8080
-      - SKILLS_DIR_NAME=skills
-      - CHROMEM_PATH=/vault/.chromem
-      - EMBEDDING_API_URL=${EMBEDDING_API_URL}
-      - EMBEDDING_API_KEY=${EMBEDDING_API_KEY}
-      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-text-embedding-3-small}
+      BIND_ADDRESS: 0.0.0.0
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-localhost,127.0.0.1}
+      EMBEDDING_API_URL: ${EMBEDDING_API_URL:-}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
 
 volumes:
-  nfs-vault:
-    driver: local
+  vault:
+  index:

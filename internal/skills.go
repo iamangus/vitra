@@ -26,19 +26,24 @@ type SkillMeta struct {
 // vault-relative so they can be used directly with the note tools. Missing or
 // unreadable directories yield an empty list.
 func (fs *FileSystem) ListSkillMetadata() ([]SkillMeta, error) {
-	dir := filepath.Join(fs.VaultPath, fs.skillsDirRel)
-	entries, err := os.ReadDir(dir)
+	dir, err := safeVaultPath(fs.VaultPath, fs.skillsDirRel)
 	if err != nil {
-		return []SkillMeta{}, nil
+		return nil, err
+	}
+	entries, err := fs.readDirectory(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []SkillMeta{}, nil
+		}
+		return nil, err
 	}
 	var skills []SkillMeta
 	for _, entry := range entries {
 		name := entry.Name()
-		if entry.IsDir() || !strings.HasSuffix(name, ".md") {
+		if !entry.Type().IsRegular() || !strings.HasSuffix(name, ".md") || strings.HasPrefix(name, ".") {
 			continue
 		}
-		fullPath := filepath.Join(dir, name)
-		content, err := os.ReadFile(fullPath)
+		content, err := fs.ReadVaultFile(filepath.Join(fs.skillsDirRel, name))
 		if err != nil {
 			continue
 		}

@@ -1,10 +1,11 @@
 <script>
-  import { createEventDispatcher, onMount } from 'svelte';
+  import { createEventDispatcher, onMount, untrack } from 'svelte';
   import ForceGraph3D from '3d-force-graph';
   import * as THREE from 'three';
   import { graph } from '../lib/api.js';
   import { subscribeToLiveUpdates } from '../lib/live.js';
   import { theme } from '../stores/theme.js';
+  import { preprocessGraph as preprocessData, tooltipLabel } from '../lib/graph.js';
 
   const dispatch = createEventDispatcher();
 
@@ -28,6 +29,8 @@
   let themeUnsub = null;
   let labelSprites = null;
   let isDarkMode = $state(false);
+  let disposed = false;
+  let graphGeneration = 0;
 
   isDarkMode = isDark();
 
@@ -46,6 +49,8 @@
     });
 
     return () => {
+      disposed = true;
+      graphGeneration++;
       clearTimeout(graphReloadTimeout);
       liveUnsub();
       if (themeUnsub) themeUnsub();
@@ -54,17 +59,18 @@
 
   $effect(() => {
     if (!container) return;
+    return untrack(() => {
     if (graphInstance) return;
 
     labelSprites = new Map();
 
-    graphInstance = ForceGraph3D()(container)
+    graphInstance = new ForceGraph3D(container)
       .nodeId('id')
       .linkSource('sourceId')
       .linkTarget('targetId')
       .backgroundColor(isDark() ? '#0a0a0c' : '#fafafa')
-      .nodeLabel(node => node.title)
-      .nodeVal(node => node.val || 1)
+      .nodeLabel(node => tooltipLabel(node))
+      .nodeVal('val')
       .nodeColor(node => getNodeColor(node))
       .linkColor(link => getLinkColor(link))
       .linkWidth(1)
@@ -86,7 +92,26 @@
     if (graphDataObj.nodes.length > 0) {
       graphInstance.graphData(graphDataObj);
     }
+    const resize = () => {
+      if (graphInstance && container) graphInstance.width(container.clientWidth).height(container.clientHeight);
+    };
+    const observer = new ResizeObserver(resize);
+    observer.observe(container);
+    resize();
+    return () => {
+      observer.disconnect();
+      disposeLabels();
+      graphInstance?._destructor();
+      graphInstance = null;
+    };
+    });
   });
+
+  function disposeLabels() {
+    if (!labelSprites) return;
+    for (const sprite of labelSprites.values()) { sprite.material.map?.dispose(); sprite.material.dispose(); }
+    labelSprites.clear();
+  }
 
   function isDark() {
     return document.documentElement.classList.contains('dark');
@@ -171,7 +196,7 @@
   function makeLabelSprite(node) {
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d');
-    const text = node.title || '';
+    const text = String(node.title || '').slice(0, 240);
     const fontSize = 128;
     ctx.font = `bold ${fontSize}px -apple-system, system-ui, sans-serif`;
     const metrics = ctx.measureText(text);
@@ -244,7 +269,9 @@
     if (!graphInstance) return;
     isDarkMode = isDark();
     graphInstance.backgroundColor(isDarkMode ? '#0a0a0c' : '#fafafa');
+    disposeLabels();
     labelSprites = new Map();
+    graphInstance.nodeThreeObject(makeLabelSprite);
     if (graphDataObj.nodes.length > 0) {
       graphInstance.graphData(graphDataObj);
       setTimeout(() => refreshRender(), 100);
@@ -266,40 +293,6 @@
         sprite.visible = shouldShowLabel(id);
       }
     }
-  }
-
-  function preprocessData(data) {
-    const maxLinks = Math.max(1, ...data.nodes.map(n => {
-      let count = 0;
-      for (const link of data.links) {
-        if (link.source === n.id || link.target === n.id) count++;
-      }
-      return count;
-    }));
-
-    const processedNodes = data.nodes.map(n => {
-      let links = 0;
-      for (const link of data.links) {
-        if (link.source === n.id || link.target === n.id) links++;
-      }
-      const linkRatio = links / maxLinks;
-      return {
-        id: n.id,
-        title: n.title,
-        type: n.type || 'Note',
-        val: 1 + Math.pow(linkRatio, 1.7) * 6,
-      };
-    });
-
-    const validIds = new Set(processedNodes.map(n => n.id));
-    const processedLinks = data.links
-      .filter(l => validIds.has(l.source) && validIds.has(l.target))
-      .map(l => ({
-        sourceId: l.source,
-        targetId: l.target,
-      }));
-
-    return { nodes: processedNodes, links: processedLinks };
   }
 
   function updateGraph(isLive = false) {
@@ -331,9 +324,11 @@
   }
 
   async function loadGraph(isLive = false) {
+    const generation = ++graphGeneration;
     error = null;
     try {
       const data = await graph.get();
+      if (disposed || generation !== graphGeneration) return;
       if (!data || !Array.isArray(data.nodes)) {
         throw new Error('Invalid graph data');
       }
@@ -342,21 +337,23 @@
       nodeCount = processed.nodes.length;
       linkCount = processed.links.length;
       hasData = processed.nodes.length > 0;
-      _selectedId = null;
-      _hoverId = null;
+      _selectedId = undefined;
+      _hoverId = undefined;
       if (graphInstance) {
         updateGraph(isLive);
         refreshRender();
       }
     } catch (e) {
+      if (disposed || generation !== graphGeneration) return;
       error = e.message;
     } finally {
-      loading = false;
+      if (!disposed && generation === graphGeneration) loading = false;
     }
   }
 </script>
 
-<div class="graph-view" bind:this={container}>
+<div class="graph-view">
+  <div class="graph-canvas" bind:this={container}></div>
   {#if loading}
     <div class="loading">Loading graph...</div>
   {:else if error}
@@ -395,6 +392,7 @@
 </div>
 
 <style>
+  .graph-canvas { position: absolute; inset: 0; }
   .graph-view {
     width: 100%;
     height: 100%;

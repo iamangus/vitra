@@ -1,40 +1,56 @@
 package internal
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/iamangus/vitra/internal/links"
 	"github.com/iamangus/vitra/internal/okf"
 	"github.com/iamangus/vitra/internal/vector"
+	"gopkg.in/yaml.v3"
 )
 
 type FileSystem struct {
-	VaultPath    string
-	VectorStore  vector.VectorStore
-	live         *LiveSync
-	index        *VaultIndex
-	skillsDirRel string
-	chunkSize    int
-	chunkOverlap int
+	VaultPath     string
+	VectorStore   vector.VectorStore
+	live          *LiveSync
+	index         *VaultIndex
+	skillsDirRel  string
+	chunkSize     int
+	chunkOverlap  int
+	mutationMu    sync.Mutex
+	statusMu      sync.Mutex
+	indexError    string
+	indexRunMu    sync.Mutex
+	indexQueue    chan struct{}
+	indexCancel   context.CancelFunc
+	indexDone     chan struct{}
+	indexedHashes map[string]string
 }
 
 func NewFileSystem(vaultPath string) *FileSystem {
+	if abs, err := filepath.Abs(vaultPath); err == nil {
+		vaultPath = abs
+	}
 	return &FileSystem{
-		VaultPath: vaultPath,
-		live:      NewLiveSync(),
+		VaultPath:    vaultPath,
+		live:         NewLiveSync(),
+		skillsDirRel: "skills",
 	}
 }
 
 // SetVectorStore attaches a vector store so that note mutations are auto-indexed.
 func (fs *FileSystem) SetVectorStore(store vector.VectorStore) {
 	fs.VectorStore = store
+	if store != nil {
+		fs.startIndexer()
+	}
 }
 
 // SetChunkConfig overrides the default note chunking parameters. Pass 0 to
@@ -69,23 +85,21 @@ type NoteData struct {
 	Frontmatter map[string]interface{} `json:"frontmatter"`
 	HTML        string                 `json:"html,omitempty"`
 	Breadcrumbs []map[string]string    `json:"breadcrumbs,omitempty"`
+	Revision    string                 `json:"revision"`
 }
 
 // ReadNote reads, parses and renders a note. Shared between web and MCP layers.
 func (fs *FileSystem) ReadNote(path string) (*NoteData, error) {
-	fullPath, err := safeVaultPath(fs.VaultPath, path+".md")
-	if err != nil {
-		return nil, fmt.Errorf("invalid path: %w", err)
-	}
-	content, err := os.ReadFile(fullPath)
+	path = noteName(path)
+	content, err := fs.ReadVaultFile(path + ".md")
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("note not found: %s", path)
+			return nil, fmt.Errorf("note not found: %w", err)
 		}
 		return nil, err
 	}
 	frontmatter, body := parseNote(content)
-	html, err := renderMarkdown(body, fs.VaultPath, fs.index)
+	html, err := renderMarkdown(body, fs.VaultPath, fs.index, filepath.Dir(path))
 	if err != nil {
 		return nil, err
 	}
@@ -96,13 +110,14 @@ func (fs *FileSystem) ReadNote(path string) (*NoteData, error) {
 	}
 	return &NoteData{
 		Path:        path,
+		Revision:    revision(content),
 		Type:        meta.Type,
 		Title:       title,
 		Description: meta.Description,
 		Resource:    meta.Resource,
 		Tags:        meta.Tags,
 		Timestamp:   meta.Timestamp,
-		Links:       okf.ExtractOKFLinks(body, filepath.Dir(path)),
+		Links:       fs.noteTargets(path, body),
 		Content:     string(content),
 		Frontmatter: frontmatter,
 		HTML:        html,
@@ -112,150 +127,124 @@ func (fs *FileSystem) ReadNote(path string) (*NoteData, error) {
 
 // WriteNote writes or overwrites a note and auto-indexes it in the vector store.
 func (fs *FileSystem) WriteNote(path, content string) error {
-	fullPath, err := safeVaultPath(fs.VaultPath, path+".md")
+	_, err := fs.SaveNote(path, content, "", false)
+	return err
+}
+
+func (fs *FileSystem) SaveNote(path, content, expected string, exclusive bool) (string, error) {
+	fs.mutationMu.Lock()
+	defer fs.mutationMu.Unlock()
+	return fs.saveNoteLocked(path, content, expected, exclusive)
+}
+
+func (fs *FileSystem) saveNoteLocked(path, content, expected string, exclusive bool) (string, error) {
+	path = noteName(path)
+	if path == "" || len(content) > maxBodySize {
+		return "", ErrInvalidPath
+	}
+	root, rel, err := fs.rootPath(path+".md", true)
 	if err != nil {
-		return fmt.Errorf("invalid path: %w", err)
+		return "", err
 	}
-	_, statErr := os.Stat(fullPath)
-	isNewNote := os.IsNotExist(statErr)
-	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
-		return err
+	defer root.Close()
+	previous, readErr := root.ReadFile(rel)
+	if readErr != nil && !os.IsNotExist(readErr) {
+		return "", readErr
 	}
-	if err := os.WriteFile(fullPath, []byte(content), 0644); err != nil {
-		return err
+	if expected != "" && (readErr != nil || revision(previous) != expected) {
+		return "", ErrConflict
+	}
+	if err := atomicNote(root, rel, []byte(content), exclusive); err != nil {
+		return "", err
 	}
 	if fs.index != nil {
 		fs.index.UpdateFile(fs.VaultPath, path)
 	}
 	fs.autoIndex(path, content)
-	fs.NotifyVaultChange([]string{path}, isNewNote, true, true, true)
-	return nil
+	fs.NotifyVaultChange([]string{path}, os.IsNotExist(readErr), true, true, true)
+	return revision([]byte(content)), nil
 }
 
 // CreateNote creates a new note if it doesn't already exist.
 func (fs *FileSystem) CreateNote(path, content string) error {
-	fullPath, err := safeVaultPath(fs.VaultPath, path+".md")
-	if err != nil {
-		return fmt.Errorf("invalid path: %w", err)
-	}
-	if _, err := os.Stat(fullPath); err == nil {
-		return fmt.Errorf("note already exists: %s", path)
-	}
-	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
-		return err
-	}
 	if content == "" {
-		content = fmt.Sprintf("---\ntype: Note\ntitle: %s\n---\n\n", filepath.Base(path))
+		content = EmitFrontmatter(map[string]interface{}{"type": "Note", "title": filepath.Base(noteName(path))}) + "\n"
 	}
-	if err := os.WriteFile(fullPath, []byte(content), 0644); err != nil {
-		return err
-	}
-	if fs.index != nil {
-		fs.index.UpdateFile(fs.VaultPath, path)
-	}
-	fs.autoIndex(path, content)
-	fs.NotifyVaultChange([]string{path}, true, true, true, true)
-	return nil
+	_, err := fs.SaveNote(path, content, "", true)
+	return err
 }
 
 // DeleteNote deletes a note (path.md) or a folder at path, and removes it from the index.
 func (fs *FileSystem) DeleteNote(path string) error {
-	fullPath, err := safeVaultPath(fs.VaultPath, path)
+	fs.mutationMu.Lock()
+	defer fs.mutationMu.Unlock()
+	root, rel, _, err := fs.resolveEntry(path)
 	if err != nil {
-		return fmt.Errorf("invalid path: %w", err)
-	}
-	info, statErr := os.Stat(fullPath)
-	if statErr != nil {
-		return fmt.Errorf("not found: %s", path)
-	}
-
-	if !info.IsDir() {
-		// It's a file (may or may not have .md suffix). Delete it directly.
-		rel := strings.TrimSuffix(filepath.ToSlash(path), ".md")
-		if err := os.Remove(fullPath); err != nil {
-			return err
-		}
-		if fs.index != nil {
-			fs.index.RemoveFile(rel)
-		}
-		fs.autoDelete(rel)
-		fs.NotifyVaultChange([]string{rel}, true, true, true, true)
-		return nil
-	}
-
-	// Folder: remove all contained notes from the index, then delete the tree.
-	if fs.index != nil || fs.VectorStore != nil {
-		filepath.WalkDir(fullPath, func(p string, d os.DirEntry, err error) error {
-			if err != nil || d.IsDir() || !strings.HasSuffix(d.Name(), ".md") {
-				return nil
-			}
-			rel, _ := filepath.Rel(fs.VaultPath, p)
-			rel = strings.TrimSuffix(filepath.ToSlash(rel), ".md")
-			if fs.index != nil {
-				fs.index.RemoveFile(rel)
-			}
-			fs.autoDelete(rel)
-			return nil
-		})
-	}
-	if err := os.RemoveAll(fullPath); err != nil {
 		return err
 	}
+	defer root.Close()
+	if err := root.RemoveAll(rel); err != nil {
+		return err
+	}
+	if fs.index != nil {
+		fs.index.RemoveFile(noteName(rel))
+	}
+	fs.autoDelete(noteName(rel))
 	fs.NotifyVaultChange([]string{path}, true, true, true, true)
 	return nil
 }
 
 // RenameNote renames or moves a note/folder and updates the index accordingly.
 func (fs *FileSystem) RenameNote(old, new string) error {
-	oldFull, err := safeVaultPath(fs.VaultPath, old)
+	fs.mutationMu.Lock()
+	defer fs.mutationMu.Unlock()
+	root, oldRel, info, err := fs.resolveEntry(old)
 	if err != nil {
-		return fmt.Errorf("invalid old path: %w", err)
-	}
-	newFull, err := safeVaultPath(fs.VaultPath, new)
-	if err != nil {
-		return fmt.Errorf("invalid new path: %w", err)
-	}
-	if err := os.Rename(oldFull, newFull); err != nil {
 		return err
 	}
-	relOld := strings.TrimSuffix(filepath.ToSlash(old), ".md")
-	relNew := strings.TrimSuffix(filepath.ToSlash(new), ".md")
-	if fs.index != nil {
-		fs.index.RenameFile(relOld, relNew)
+	defer root.Close()
+	if !info.IsDir() {
+		new = noteName(new) + ".md"
 	}
-	// Re-index any notes under the new path.
-	if fs.VectorStore != nil {
-		fs.autoDelete(relOld)
-		info, err := os.Stat(newFull)
-		if err == nil && !info.IsDir() && strings.HasSuffix(new, ".md") {
-			if content, err := os.ReadFile(newFull); err == nil {
-				fs.autoIndex(relNew, string(bytes.TrimSpace(content)))
-			}
-		} else if err == nil && info.IsDir() {
-			filepath.WalkDir(newFull, func(p string, d os.DirEntry, err error) error {
-				if err != nil || d.IsDir() || !strings.HasSuffix(d.Name(), ".md") {
-					return nil
-				}
-				rel, _ := filepath.Rel(fs.VaultPath, p)
-				rel = strings.TrimSuffix(filepath.ToSlash(rel), ".md")
-				if content, err := os.ReadFile(p); err == nil {
-					fs.autoIndex(rel, string(bytes.TrimSpace(content)))
-				}
-				return nil
-			})
+	newRoot, newRel, err := fs.rootPath(new, true)
+	if err != nil {
+		return err
+	}
+	defer newRoot.Close()
+	if _, err := root.Stat(newRel); err == nil {
+		return ErrConflict
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if err := root.MkdirAll(filepath.Dir(newRel), 0755); err != nil {
+		return err
+	}
+	if err := renameNoReplace(root, oldRel, newRel); err != nil {
+		return err
+	}
+	relOld, relNew := noteName(oldRel), noteName(newRel)
+	if fs.index != nil {
+		fs.index.RemoveFile(relOld)
+		if err := fs.index.Build(fs.VaultPath); err != nil {
+			return err
 		}
 	}
+	fs.autoDelete(relOld)
+	fs.indexSubtree(relNew)
 	fs.NotifyVaultChange([]string{relOld, relNew}, true, true, true, true)
 	return nil
 }
 
 // CreateFolder creates a folder.
 func (fs *FileSystem) CreateFolder(path string) error {
-	fullPath, err := safeVaultPath(fs.VaultPath, path)
+	fs.mutationMu.Lock()
+	defer fs.mutationMu.Unlock()
+	root, rel, err := fs.rootPath(path, true)
 	if err != nil {
 		return fmt.Errorf("invalid path: %w", err)
 	}
-	if err := os.MkdirAll(fullPath, 0755); err != nil {
+	defer root.Close()
+	if err := root.MkdirAll(rel, 0755); err != nil {
 		return err
 	}
 	fs.NotifyVaultChange([]string{path}, true, false, false, false)
@@ -265,9 +254,9 @@ func (fs *FileSystem) CreateFolder(path string) error {
 // ListNotes returns the file tree for the vault (or a subpath), without
 // UI-specific fields like IsActive/IsOpen.
 func (fs *FileSystem) ListNotes(subpath string) ([]SimpleFileNode, error) {
-	dir := fs.VaultPath
-	if subpath != "" {
-		dir = filepath.Join(fs.VaultPath, subpath)
+	dir, err := safeVaultPath(fs.VaultPath, subpath)
+	if err != nil {
+		return nil, err
 	}
 	return fs.buildSimpleTree(dir, 0)
 }
@@ -289,26 +278,12 @@ func (fs *FileSystem) SearchNotes(query string) ([]SearchResult, error) {
 	if fs.index != nil {
 		return fs.index.Search(query), nil
 	}
-	var results []SearchResult
-	err := filepath.Walk(fs.VaultPath, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() || !strings.HasSuffix(info.Name(), ".md") {
-			return nil
-		}
-		content, err := os.ReadFile(path)
-		if err != nil {
-			return nil
-		}
-		if strings.Contains(strings.ToLower(string(content)), query) {
-			rel, _ := filepath.Rel(fs.VaultPath, path)
-			rel = strings.TrimSuffix(filepath.ToSlash(rel), ".md")
-			results = append(results, SearchResult{
-				Path:  rel,
-				Title: strings.TrimSuffix(info.Name(), ".md"),
-			})
-		}
-		return nil
-	})
-	return results, err
+	idx := NewVaultIndex()
+	idx.SetSkillsDir(fs.skillsDirRel)
+	if err := idx.Build(fs.VaultPath); err != nil {
+		return nil, err
+	}
+	return idx.Search(query), nil
 }
 
 // NoteBacklinks returns notes that link to the given path.
@@ -316,39 +291,12 @@ func (fs *FileSystem) NoteBacklinks(path string) ([]BacklinkResult, error) {
 	if fs.index != nil {
 		return fs.index.GetBacklinks(path), nil
 	}
-	var backlinks []BacklinkResult
-	targetName := filepath.Base(path)
-	err := filepath.Walk(fs.VaultPath, func(filePath string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
-			if info != nil && info.IsDir() && fs.skillsDirRel != "" {
-				rel, rdErr := filepath.Rel(fs.VaultPath, filePath)
-				if rdErr == nil && rel == fs.skillsDirRel {
-					return filepath.SkipDir
-				}
-			}
-			return nil
-		}
-		if !strings.HasSuffix(info.Name(), ".md") {
-			return nil
-		}
-		rel, _ := filepath.Rel(fs.VaultPath, filePath)
-		rel = strings.TrimSuffix(filepath.ToSlash(rel), ".md")
-		if rel == path {
-			return nil
-		}
-		content, err := os.ReadFile(filePath)
-		if err != nil {
-			return nil
-		}
-		if strings.Contains(string(content), "[["+targetName+"]]") {
-			backlinks = append(backlinks, BacklinkResult{
-				Path:  rel,
-				Title: strings.TrimSuffix(info.Name(), ".md"),
-			})
-		}
-		return nil
-	})
-	return backlinks, err
+	idx := NewVaultIndex()
+	idx.SetSkillsDir(fs.skillsDirRel)
+	if err := idx.Build(fs.VaultPath); err != nil {
+		return nil, err
+	}
+	return idx.GetBacklinks(path), nil
 }
 
 // SemanticSearch proxies the vector store's semantic search.
@@ -356,7 +304,11 @@ func (fs *FileSystem) SemanticSearch(ctx context.Context, query string, limit in
 	if fs.VectorStore == nil {
 		return nil, fmt.Errorf("vector store not configured")
 	}
-	return fs.VectorStore.SemanticSearch(ctx, query, limit, filter)
+	results, err := fs.VectorStore.SemanticSearch(ctx, query, limit, filter)
+	if err != nil {
+		return nil, err
+	}
+	return fs.visibleSearchResults(results), nil
 }
 
 // FindSimilarFiles proxies the vector store's similar-file search.
@@ -364,7 +316,30 @@ func (fs *FileSystem) FindSimilarFiles(ctx context.Context, path string, limit i
 	if fs.VectorStore == nil {
 		return nil, fmt.Errorf("vector store not configured")
 	}
-	return fs.VectorStore.FindSimilarFiles(ctx, path, limit, filter)
+	results, err := fs.VectorStore.FindSimilarFiles(ctx, path, limit, filter)
+	if err != nil {
+		return nil, err
+	}
+	return fs.visibleSearchResults(results), nil
+}
+
+func (fs *FileSystem) visibleSearchResults(results []vector.SearchResult) []vector.SearchResult {
+	out := make([]vector.SearchResult, 0, len(results))
+	for _, result := range results {
+		if excludedPath(result.Path+".md", fs.skillsDirRel, true) {
+			continue
+		}
+		root, rel, err := fs.rootPath(result.Path+".md", false)
+		if err != nil {
+			continue
+		}
+		info, err := root.Stat(rel)
+		root.Close()
+		if err == nil && info.Mode().IsRegular() {
+			out = append(out, result)
+		}
+	}
+	return out
 }
 
 // ReindexVault rebuilds the entire vector index from the on-disk vault.
@@ -372,76 +347,51 @@ func (fs *FileSystem) ReindexVault(ctx context.Context) (int, error) {
 	if fs.VectorStore == nil {
 		return 0, fmt.Errorf("vector store not configured")
 	}
-	if err := fs.VectorStore.ReindexVault(ctx, fs.VaultPath); err != nil {
+	fs.indexRunMu.Lock()
+	defer fs.indexRunMu.Unlock()
+	fs.mutationMu.Lock()
+	defer fs.mutationMu.Unlock()
+	notes := map[string][]vector.Chunk{}
+	hashes := map[string]string{}
+	err := walkNotes(fs.VaultPath, "", fs.skillsDirRel, true, func(path string, data []byte) error {
+		notes[path] = fs.noteChunks(path, data)
+		hashes[path] = revision(data)
+		return ctx.Err()
+	})
+	if err != nil {
 		return 0, err
 	}
-	var indexed int
-	err := filepath.Walk(fs.VaultPath, func(filePath string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() || !strings.HasSuffix(info.Name(), ".md") {
-			return nil
-		}
-		rel, _ := filepath.Rel(fs.VaultPath, filePath)
-		rel = strings.TrimSuffix(filepath.ToSlash(rel), ".md")
-		content, err := os.ReadFile(filePath)
-		if err != nil {
-			return nil
-		}
-		frontmatter, _ := parseNote(content)
-		title := ""
-		if t, ok := frontmatter["title"].(string); ok {
-			title = t
-		}
-		meta := okf.Extract(frontmatter)
-		chunks := vector.ChunkNote(rel, string(content), fs.chunkSize, fs.chunkOverlap, title)
-		for i := range chunks {
-			chunks[i].Type = meta.Type
-			chunks[i].Tags = meta.Tags
-		}
-		if err := fs.VectorStore.IndexNote(ctx, rel, chunks); err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to index %s: %v\n", rel, err)
-		} else {
-			indexed++
-		}
-		return nil
+	replacer, ok := fs.VectorStore.(interface {
+		ReplaceNotes(context.Context, map[string][]vector.Chunk) error
 	})
-	return indexed, err
+	if !ok {
+		return 0, fmt.Errorf("store does not support atomic reindex")
+	}
+	if err := replacer.ReplaceNotes(ctx, notes); err != nil {
+		fs.recordIndexError(err)
+		return 0, err
+	}
+	fs.indexedHashes = hashes
+	fs.statusMu.Lock()
+	fs.indexError = ""
+	fs.statusMu.Unlock()
+	return len(notes), nil
 }
 
 // autoIndex indexes a note's content into the vector store, logging failures.
 // OKF metadata (type, tags) is extracted from the note's frontmatter so that
 // type/tag-filtered queries match correctly.
 func (fs *FileSystem) autoIndex(path, content string) {
-	if fs.VectorStore == nil || fs.isSkillsPath(path) {
-		return
-	}
-	frontmatter, _ := parseNote([]byte(content))
-	title := ""
-	if t, ok := frontmatter["title"].(string); ok {
-		title = t
-	}
-	meta := okf.Extract(frontmatter)
-	chunks := vector.ChunkNote(path, content, fs.chunkSize, fs.chunkOverlap, title)
-	for i := range chunks {
-		chunks[i].Type = meta.Type
-		chunks[i].Tags = meta.Tags
-	}
-	if err := fs.VectorStore.IndexNote(context.Background(), path, chunks); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to index note %s: %v\n", path, err)
-	}
+	fs.queueIndex()
 }
 
 // autoDelete removes a note from the vector store, logging failures.
 func (fs *FileSystem) autoDelete(path string) {
-	if fs.VectorStore == nil || fs.isSkillsPath(path) {
-		return
-	}
-	if err := fs.VectorStore.DeleteNote(context.Background(), path); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to delete note %s from index: %v\n", path, err)
-	}
+	fs.queueIndex()
 }
 
 func (fs *FileSystem) buildSimpleTree(dir string, depth int) ([]SimpleFileNode, error) {
-	entries, err := os.ReadDir(dir)
+	entries, err := fs.readDirectory(dir)
 	if err != nil {
 		return nil, err
 	}
@@ -458,10 +408,17 @@ func (fs *FileSystem) buildSimpleTree(dir string, depth int) ([]SimpleFileNode, 
 		fullPath := filepath.Join(dir, name)
 		relPath, _ := filepath.Rel(fs.VaultPath, fullPath)
 		relPath = filepath.ToSlash(relPath)
+		if excludedPath(relPath, fs.skillsDirRel, true) || entry.Type()&os.ModeSymlink != 0 || (!entry.IsDir() && !strings.HasSuffix(name, ".md")) {
+			continue
+		}
 		node := SimpleFileNode{
 			Name:  strings.TrimSuffix(name, ".md"),
 			Path:  strings.TrimSuffix(relPath, ".md"),
 			IsDir: entry.IsDir(),
+		}
+		if entry.IsDir() {
+			node.Path = relPath
+			node.Name = name
 		}
 		if entry.IsDir() {
 			children, err := fs.buildSimpleTree(fullPath, depth+1)
@@ -481,6 +438,9 @@ func (fs *FileSystem) buildSimpleTree(dir string, depth int) ([]SimpleFileNode, 
 }
 
 func (fs *FileSystem) BuildIndex() error {
+	if err := os.MkdirAll(fs.VaultPath, 0755); err != nil {
+		return err
+	}
 	idx := NewVaultIndex()
 	idx.SetSkillsDir(fs.skillsDirRel)
 	if err := idx.Build(fs.VaultPath); err != nil {
@@ -501,6 +461,10 @@ func (fs *FileSystem) StartWatcher() error {
 }
 
 func (fs *FileSystem) CloseWatcher() error {
+	if fs.indexCancel != nil {
+		fs.indexCancel()
+		<-fs.indexDone
+	}
 	if fs.live == nil {
 		return nil
 	}
@@ -525,7 +489,7 @@ type FileNode struct {
 }
 
 func (fs *FileSystem) buildTree(dir string, activePath string, depth int) ([]FileNode, error) {
-	entries, err := os.ReadDir(dir)
+	entries, err := fs.readDirectory(dir)
 	if err != nil {
 		return nil, err
 	}
@@ -545,6 +509,9 @@ func (fs *FileSystem) buildTree(dir string, activePath string, depth int) ([]Fil
 		relPath, _ := filepath.Rel(fs.VaultPath, fullPath)
 		relPath = filepath.ToSlash(relPath)
 
+		if excludedPath(relPath, fs.skillsDirRel, true) || entry.Type()&os.ModeSymlink != 0 || (!entry.IsDir() && !strings.HasSuffix(name, ".md")) {
+			continue
+		}
 		node := FileNode{
 			Name:     strings.TrimSuffix(name, ".md"),
 			Path:     strings.TrimSuffix(relPath, ".md"),
@@ -552,6 +519,10 @@ func (fs *FileSystem) buildTree(dir string, activePath string, depth int) ([]Fil
 			IsActive: strings.TrimSuffix(relPath, ".md") == activePath,
 			IsOpen:   depth < 2,
 			Depth:    depth,
+		}
+		if entry.IsDir() {
+			node.Path = relPath
+			node.Name = name
 		}
 
 		if entry.IsDir() {
@@ -607,7 +578,7 @@ type ConceptFilter struct {
 // The second return value is the vault-root index.md's declared okf_version.
 func (fs *FileSystem) ListConcepts(filter ConceptFilter) ([]ConceptView, string, error) {
 	okfVersion := ""
-	if rootIdx, err := os.ReadFile(filepath.Join(fs.VaultPath, "index.md")); err == nil {
+	if rootIdx, err := fs.ReadVaultFile("index.md"); err == nil {
 		if fm, _ := parseNote(rootIdx); fm != nil {
 			if v, ok := fm["okf_version"]; ok {
 				if s, ok := v.(string); ok {
@@ -619,26 +590,7 @@ func (fs *FileSystem) ListConcepts(filter ConceptFilter) ([]ConceptView, string,
 
 	limit := filter.Limit
 	var views []ConceptView
-	err := filepath.Walk(fs.VaultPath, func(filePath string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
-			if info != nil && info.IsDir() && fs.skillsDirRel != "" {
-				rel, rdErr := filepath.Rel(fs.VaultPath, filePath)
-				if rdErr == nil && rel == fs.skillsDirRel {
-					return filepath.SkipDir
-				}
-			}
-			return nil
-		}
-		if !strings.HasSuffix(info.Name(), ".md") {
-			return nil
-		}
-		if okf.IsReservedFilename(info.Name()) {
-			return nil
-		}
-		content, err := os.ReadFile(filePath)
-		if err != nil {
-			return nil
-		}
+	err := walkNotes(fs.VaultPath, "", fs.skillsDirRel, true, func(rel string, content []byte) error {
 		frontmatter, _ := parseNote(content)
 		meta := okf.Extract(frontmatter)
 
@@ -659,15 +611,19 @@ func (fs *FileSystem) ListConcepts(filter ConceptFilter) ([]ConceptView, string,
 				}
 			}
 		}
-		if filter.Since != "" && meta.Timestamp != "" && meta.Timestamp < filter.Since {
-			return nil
+		if filter.Since != "" {
+			since, err := time.Parse(time.RFC3339, filter.Since)
+			if err != nil {
+				return err
+			}
+			timestamp, err := time.Parse(time.RFC3339, meta.Timestamp)
+			if err != nil || timestamp.Before(since) {
+				return nil
+			}
 		}
-
-		rel, _ := filepath.Rel(fs.VaultPath, filePath)
-		rel = strings.TrimSuffix(filepath.ToSlash(rel), ".md")
 		title := meta.Title
 		if title == "" {
-			title = strings.TrimSuffix(info.Name(), ".md")
+			title = filepath.Base(rel)
 		}
 		views = append(views, ConceptView{
 			Path:        rel,
@@ -707,30 +663,11 @@ type ActivityEntry struct {
 // ListActivity walks the vault for log.md files (any depth), parses each via
 // okf.ParseLogEntries, and returns the merged set sorted newest first.
 func (fs *FileSystem) ListActivity(scope string, limit int) ([]ActivityEntry, error) {
-	root := fs.VaultPath
-	if scope != "" {
-		root = filepath.Join(fs.VaultPath, scope)
-	}
 	var entries []ActivityEntry
-	err := filepath.Walk(root, func(filePath string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
-			if info != nil && info.IsDir() && fs.skillsDirRel != "" {
-				rel, rdErr := filepath.Rel(fs.VaultPath, filePath)
-				if rdErr == nil && rel == fs.skillsDirRel {
-					return filepath.SkipDir
-				}
-			}
+	err := walkNotes(fs.VaultPath, scope, fs.skillsDirRel, false, func(rel string, content []byte) error {
+		if filepath.Base(rel) != "log" {
 			return nil
 		}
-		if info.Name() != "log.md" {
-			return nil
-		}
-		content, err := os.ReadFile(filePath)
-		if err != nil {
-			return nil
-		}
-		rel, _ := filepath.Rel(fs.VaultPath, filePath)
-		rel = strings.TrimSuffix(filepath.ToSlash(rel), ".md")
 		sourcePath := filepath.Dir(rel)
 		for _, e := range okf.ParseLogEntries(content) {
 			entries = append(entries, ActivityEntry{
@@ -758,37 +695,76 @@ func (fs *FileSystem) ListActivity(scope string, limit int) ([]ActivityEntry, er
 // while preserving the body verbatim. If `timestamp` is not in updates, the
 // current UTC time is injected. The note is re-indexed and live notified.
 func (fs *FileSystem) UpdateNoteMetadata(path string, updates map[string]interface{}) error {
-	fullPath, err := safeVaultPath(fs.VaultPath, path+".md")
+	_, err := fs.PatchNote(path, updates, nil, "")
+	return err
+}
+
+func (fs *FileSystem) PatchNote(path string, updates map[string]interface{}, replacement *string, expected string) (string, error) {
+	fs.mutationMu.Lock()
+	defer fs.mutationMu.Unlock()
+	content, err := fs.ReadVaultFile(noteName(path) + ".md")
 	if err != nil {
-		return fmt.Errorf("invalid path: %w", err)
+		return "", err
 	}
-	content, err := os.ReadFile(fullPath)
+	fm, body, err := splitFrontmatter(content)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return fmt.Errorf("note not found: %s", path)
+		return "", err
+	}
+	node := yaml.Node{Kind: yaml.MappingNode}
+	if fm != nil {
+		var validated map[string]interface{}
+		if err := yaml.Unmarshal(fm, &validated); err != nil {
+			return "", err
 		}
-		return err
+		var doc yaml.Node
+		if err := yaml.Unmarshal(fm, &doc); err != nil {
+			return "", err
+		}
+		if len(doc.Content) != 1 || doc.Content[0].Kind != yaml.MappingNode {
+			return "", fmt.Errorf("frontmatter must be a mapping")
+		}
+		node = *doc.Content[0]
 	}
-	frontmatter, body := parseNote(content)
-	if frontmatter == nil {
-		frontmatter = map[string]interface{}{}
-	}
+	merged := make(map[string]interface{}, len(updates)+1)
 	for k, v := range updates {
-		frontmatter[k] = v
+		merged[k] = v
 	}
-	if _, ok := frontmatter["timestamp"]; !ok {
-		frontmatter["timestamp"] = okf.FormatTimestamp(time.Now())
+	if _, ok := merged["timestamp"]; !ok {
+		merged["timestamp"] = okf.FormatTimestamp(time.Now())
+	} else {
+		timestamp, ok := merged["timestamp"].(string)
+		if !ok {
+			return "", ErrInvalidPath
+		}
+		if _, err := time.Parse(time.RFC3339, timestamp); err != nil {
+			return "", ErrInvalidPath
+		}
 	}
-	newContent := EmitFrontmatter(frontmatter) + string(body)
-	if err := os.WriteFile(fullPath, []byte(newContent), 0644); err != nil {
-		return err
+	for key, value := range merged {
+		var val yaml.Node
+		if err := val.Encode(value); err != nil {
+			return "", err
+		}
+		found := false
+		for i := 0; i < len(node.Content); i += 2 {
+			if node.Content[i].Value == key {
+				node.Content[i+1] = &val
+				found = true
+				break
+			}
+		}
+		if !found {
+			node.Content = append(node.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key}, &val)
+		}
 	}
-	if fs.index != nil {
-		fs.index.UpdateFile(fs.VaultPath, path)
+	encoded, err := yaml.Marshal(&node)
+	if err != nil {
+		return "", err
 	}
-	fs.autoIndex(path, newContent)
-	fs.NotifyVaultChange([]string{path}, false, true, true, true)
-	return nil
+	if replacement != nil {
+		body = []byte(*replacement)
+	}
+	return fs.saveNoteLocked(path, "---\n"+string(encoded)+"---\n"+string(body), expected, false)
 }
 
 // EmitFrontmatter renders a frontmatter map back into a `---\n...\n---\n` YAML
@@ -796,65 +772,11 @@ func (fs *FileSystem) UpdateNoteMetadata(path string, updates map[string]interfa
 // resource, tags, timestamp, okf_version), then any extra keys. Values are
 // quoted only when they contain YAML special characters.
 func EmitFrontmatter(fm map[string]interface{}) string {
-	var b strings.Builder
-	b.WriteString("---\n")
-	order := []string{"type", "title", "summary", "description", "resource", "tags", "timestamp", "okf_version"}
-	written := make(map[string]bool)
-	for _, k := range order {
-		if v, ok := fm[k]; ok {
-			writeYamlKV(&b, k, v)
-			written[k] = true
-		}
+	data, err := yaml.Marshal(fm)
+	if err != nil {
+		return ""
 	}
-	keys := make([]string, 0, len(fm))
-	for k := range fm {
-		if !written[k] {
-			keys = append(keys, k)
-		}
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
-		writeYamlKV(&b, k, fm[k])
-	}
-	b.WriteString("---\n")
-	return b.String()
-}
-
-func writeYamlKV(b *strings.Builder, k string, v interface{}) {
-	switch val := v.(type) {
-	case []interface{}:
-		b.WriteString(k)
-		b.WriteString(": [")
-		for i, item := range val {
-			if i > 0 {
-				b.WriteString(", ")
-			}
-			b.WriteString(yamlQuote(fmt.Sprintf("%v", item)))
-		}
-		b.WriteString("]\n")
-	case []string:
-		b.WriteString(k)
-		b.WriteString(": [")
-		for i, item := range val {
-			if i > 0 {
-				b.WriteString(", ")
-			}
-			b.WriteString(yamlQuote(item))
-		}
-		b.WriteString("]\n")
-	default:
-		b.WriteString(k)
-		b.WriteString(": ")
-		b.WriteString(yamlQuote(fmt.Sprintf("%v", val)))
-		b.WriteString("\n")
-	}
-}
-
-func yamlQuote(s string) string {
-	if s == "" || strings.ContainsAny(s, ":#[]{}\n\"'") {
-		return strconv.Quote(s)
-	}
-	return s
+	return "---\n" + string(data) + "---\n"
 }
 
 // EnsureOKFFrontmatter guarantees OKF-compliant frontmatter for new notes.
@@ -948,8 +870,8 @@ func (fs *FileSystem) TransitiveClosure(seed string, depth int) ([]ConceptView, 
 				continue
 			}
 			_, body := parseNote(content)
-			links := okf.ExtractOKFLinks(body, filepath.Dir(p))
-			for _, link := range links {
+			targets := fs.noteTargets(p, body)
+			for _, link := range targets {
 				if visited[link] {
 					continue
 				}
@@ -963,4 +885,22 @@ func (fs *FileSystem) TransitiveClosure(seed string, depth int) ([]ConceptView, 
 		frontier = next
 	}
 	return found, nil
+}
+
+func (fs *FileSystem) noteTargets(path string, body []byte) []string {
+	targets := links.Extract(body, filepath.Dir(path), true)
+	out := make([]string, 0, len(targets))
+	seen := map[string]bool{}
+	for _, target := range targets {
+		if fs.index != nil {
+			if resolved := fs.index.FindPath(target); resolved != "" {
+				target = resolved
+			}
+		}
+		if !seen[target] && !excludedPath(target+".md", fs.skillsDirRel, true) {
+			seen[target] = true
+			out = append(out, target)
+		}
+	}
+	return out
 }

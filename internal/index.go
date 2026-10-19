@@ -1,8 +1,10 @@
 package internal
 
 import (
+	"github.com/iamangus/vitra/internal/links"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -33,39 +35,65 @@ func (idx *VaultIndex) SetSkillsDir(rel string) {
 	idx.skillsDirRel = rel
 }
 
+func (idx *VaultIndex) rebuildAliases() {
+	idx.titleIndex = map[string]string{}
+	add := func(alias, target string) {
+		key := strings.ToLower(alias)
+		if previous, ok := idx.titleIndex[key]; ok && previous != target {
+			idx.titleIndex[key] = ""
+		} else {
+			idx.titleIndex[key] = target
+		}
+	}
+	paths := make([]string, 0, len(idx.notes))
+	for p := range idx.notes {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+	for _, p := range paths {
+		meta := idx.notes[p]
+		add(meta.Title, p)
+		add(filepath.Base(p), p)
+	}
+	for _, p := range paths {
+		idx.titleIndex[strings.ToLower(p)] = p
+	}
+}
+
 func (idx *VaultIndex) Build(vaultPath string) error {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
-
-	idx.notes = make(map[string]*NoteMeta)
-	idx.titleIndex = make(map[string]string)
-
-	return filepath.Walk(vaultPath, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
-			if info != nil && info.IsDir() && idx.skillsDirRel != "" {
-				rel, rdErr := filepath.Rel(vaultPath, path)
-				if rdErr == nil && rel == idx.skillsDirRel {
-					return filepath.SkipDir
-				}
-			}
-			return nil
-		}
-		if !strings.HasSuffix(info.Name(), ".md") {
-			return nil
-		}
-		rel, _ := filepath.Rel(vaultPath, path)
-		rel = strings.TrimSuffix(filepath.ToSlash(rel), ".md")
-		idx.indexFile(vaultPath, path, rel, strings.TrimSuffix(info.Name(), ".md"))
+	previousNotes, previousTitles := idx.notes, idx.titleIndex
+	idx.notes, idx.titleIndex = make(map[string]*NoteMeta), make(map[string]string)
+	err := walkNotes(vaultPath, "", idx.skillsDirRel, true, func(rel string, content []byte) error {
+		idx.indexContent(rel, content)
 		return nil
 	})
+	if err != nil {
+		idx.notes, idx.titleIndex = previousNotes, previousTitles
+	} else {
+		idx.rebuildAliases()
+	}
+	return err
 }
 
 func (idx *VaultIndex) indexFile(vaultPath, fullPath, relPath, title string) {
-	content, err := os.ReadFile(fullPath)
+	root, err := os.OpenRoot(vaultPath)
+	if err != nil {
+		return
+	}
+	defer root.Close()
+	content, err := root.ReadFile(relPath + ".md")
 	if err != nil {
 		return
 	}
 
+	idx.indexContent(relPath, content)
+	idx.rebuildAliases()
+}
+
+func (idx *VaultIndex) indexContent(relPath string, content []byte) {
+	title := filepath.Base(relPath)
 	meta := &NoteMeta{
 		Path:     relPath,
 		Title:    title,
@@ -74,16 +102,22 @@ func (idx *VaultIndex) indexFile(vaultPath, fullPath, relPath, title string) {
 		RawLinks: extractWikiLinkTargets(string(content)),
 	}
 	if fm, _ := parseNote(content); fm != nil {
+		if t, ok := fm["title"].(string); ok && t != "" {
+			meta.Title = t
+		}
 		if t, ok := fm["type"]; ok {
 			if s, ok := t.(string); ok && s != "" {
 				meta.Type = s
 			}
 		}
 	}
+	_, body := parseNote(content)
+	meta.RawLinks = links.Extract(body, filepath.Dir(relPath), true)
 
 	idx.notes[relPath] = meta
 	idx.titleIndex[strings.ToLower(relPath)] = relPath
 	idx.titleIndex[strings.ToLower(title)] = relPath
+	idx.titleIndex[strings.ToLower(meta.Title)] = relPath
 	idx.titleIndex[strings.ToLower(filepath.Base(relPath))] = relPath
 }
 
@@ -91,7 +125,7 @@ func (idx *VaultIndex) UpdateFile(vaultPath, relPath string) {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 
-	if idx.skillsDirRel != "" && strings.HasPrefix(relPath+"/", idx.skillsDirRel+"/") {
+	if excludedPath(relPath+".md", idx.skillsDirRel, true) {
 		return
 	}
 
@@ -104,14 +138,12 @@ func (idx *VaultIndex) RemoveFile(relPath string) {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 
-	meta := idx.notes[relPath]
-	if meta == nil {
-		return
+	for p := range idx.notes {
+		if p == relPath || strings.HasPrefix(p, relPath+"/") {
+			delete(idx.notes, p)
+		}
 	}
-	delete(idx.notes, relPath)
-	delete(idx.titleIndex, strings.ToLower(relPath))
-	delete(idx.titleIndex, strings.ToLower(meta.Title))
-	delete(idx.titleIndex, strings.ToLower(filepath.Base(relPath)))
+	idx.rebuildAliases()
 }
 
 func (idx *VaultIndex) RenameFile(oldPath, newPath string) {
@@ -142,6 +174,7 @@ func (idx *VaultIndex) GetGraph() (nodes []GraphNode, links []GraphLink) {
 	defer idx.mu.RUnlock()
 
 	nodes = make([]GraphNode, 0, len(idx.notes))
+	links = make([]GraphLink, 0)
 	for _, meta := range idx.notes {
 		nodes = append(nodes, GraphNode{ID: meta.Path, Title: meta.Title, Type: meta.Type})
 	}
@@ -165,6 +198,13 @@ func (idx *VaultIndex) GetGraph() (nodes []GraphNode, links []GraphLink) {
 		}
 	}
 
+	sort.Slice(nodes, func(i, j int) bool { return nodes[i].ID < nodes[j].ID })
+	sort.Slice(links, func(i, j int) bool {
+		if links[i].Source != links[j].Source {
+			return links[i].Source < links[j].Source
+		}
+		return links[i].Target < links[j].Target
+	})
 	return nodes, links
 }
 
@@ -179,6 +219,7 @@ func (idx *VaultIndex) Search(query string) []SearchResult {
 			results = append(results, SearchResult{Path: meta.Path, Title: meta.Title})
 		}
 	}
+	sort.Slice(results, func(i, j int) bool { return results[i].Path < results[j].Path })
 	return results
 }
 
@@ -218,6 +259,9 @@ func (idx *VaultIndex) FindPath(title string) string {
 	if p, ok := idx.titleIndex[titleLower]; ok {
 		return p
 	}
+	if strings.Contains(title, "/") {
+		return ""
+	}
 
 	base := strings.ToLower(filepath.Base(title))
 	if p, ok := idx.titleIndex[base]; ok {
@@ -250,6 +294,9 @@ func resolveTitle(titleIndex map[string]string, title string) string {
 
 	if p, ok := titleIndex[titleLower]; ok {
 		return p
+	}
+	if strings.Contains(title, "/") {
+		return ""
 	}
 
 	base := strings.ToLower(filepath.Base(title))

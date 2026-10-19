@@ -8,11 +8,18 @@ function ensureEventSource() {
   }
 
   eventSource = new EventSource('/api/events');
+  eventSource.onopen = () => {
+    for (const listener of listeners) {
+      try { listener({ tree: true, graph: true, search: true, notes: true, activity: true }); }
+      catch (error) { console.error('Live update listener failed:', error); }
+    }
+  };
   eventSource.addEventListener('vault', (event) => {
     try {
       const payload = JSON.parse(event.data);
       for (const listener of listeners) {
-        listener(payload);
+        try { listener(payload); }
+        catch (error) { console.error('Live update listener failed:', error); }
       }
     } catch (error) {
       console.error('Failed to parse live update payload:', error);

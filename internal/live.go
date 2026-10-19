@@ -18,13 +18,14 @@ import (
 const vaultChangeDebounce = 400 * time.Millisecond
 
 type VaultEvent struct {
-	Type    string   `json:"type"`
-	Version int64    `json:"version"`
-	Paths   []string `json:"paths,omitempty"`
-	Tree    bool     `json:"tree,omitempty"`
-	Graph   bool     `json:"graph,omitempty"`
-	Search  bool     `json:"search,omitempty"`
-	Notes   bool     `json:"notes,omitempty"`
+	Type     string   `json:"type"`
+	Version  int64    `json:"version"`
+	Paths    []string `json:"paths,omitempty"`
+	Tree     bool     `json:"tree,omitempty"`
+	Graph    bool     `json:"graph,omitempty"`
+	Search   bool     `json:"search,omitempty"`
+	Notes    bool     `json:"notes,omitempty"`
+	Activity bool     `json:"activity,omitempty"`
 }
 
 type LiveSync struct {
@@ -36,6 +37,8 @@ type LiveSync struct {
 	version      int64
 	watcher      *fsnotify.Watcher
 	index        *VaultIndex
+	reconcile    func()
+	watchError   string
 }
 
 func NewLiveSync() *LiveSync {
@@ -51,6 +54,17 @@ func (ls *LiveSync) SetIndex(idx *VaultIndex) {
 	ls.index = idx
 	ls.mu.Unlock()
 }
+
+func (ls *LiveSync) SetReconcile(fn func()) { ls.mu.Lock(); ls.reconcile = fn; ls.mu.Unlock() }
+
+func (ls *LiveSync) watcherFailure(err error) {
+	ls.mu.Lock()
+	ls.watchError = err.Error()
+	ls.mu.Unlock()
+	log.Printf("vault watcher: %v", err)
+}
+
+func (ls *LiveSync) WatchError() string { ls.mu.Lock(); defer ls.mu.Unlock(); return ls.watchError }
 
 func (ls *LiveSync) Start(vaultPath string) error {
 	watcher, err := fsnotify.NewWatcher()
@@ -88,7 +102,7 @@ func (ls *LiveSync) Close() error {
 }
 
 func (ls *LiveSync) HandleSSE(w http.ResponseWriter, r *http.Request) {
-	flusher, ok := w.(http.Flusher)
+	_, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
 		return
@@ -102,8 +116,17 @@ func (ls *LiveSync) HandleSSE(w http.ResponseWriter, r *http.Request) {
 	ch, unsubscribe := ls.subscribe()
 	defer unsubscribe()
 
-	_, _ = fmt.Fprint(w, ": connected\n\n")
-	flusher.Flush()
+	controller := http.NewResponseController(w)
+	write := func(payload string) error {
+		_ = controller.SetWriteDeadline(time.Now().Add(10 * time.Second))
+		if _, err := fmt.Fprint(w, payload); err != nil {
+			return err
+		}
+		return controller.Flush()
+	}
+	if err := write(": connected\n\n"); err != nil {
+		return
+	}
 
 	keepalive := time.NewTicker(25 * time.Second)
 	defer keepalive.Stop()
@@ -111,11 +134,13 @@ func (ls *LiveSync) HandleSSE(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case payload := <-ch:
-			_, _ = fmt.Fprintf(w, "event: vault\ndata: %s\n\n", payload)
-			flusher.Flush()
+			if err := write(fmt.Sprintf("event: vault\ndata: %s\n\n", payload)); err != nil {
+				return
+			}
 		case <-keepalive.C:
-			_, _ = fmt.Fprint(w, ": keepalive\n\n")
-			flusher.Flush()
+			if err := write(": keepalive\n\n"); err != nil {
+				return
+			}
 		case <-r.Context().Done():
 			return
 		}
@@ -131,6 +156,7 @@ func (ls *LiveSync) Notify(paths []string, tree bool, graph bool, search bool, n
 	ls.pending.Graph = ls.pending.Graph || graph
 	ls.pending.Search = ls.pending.Search || search
 	ls.pending.Notes = ls.pending.Notes || notes
+	ls.pending.Activity = ls.pending.Activity || notes || tree
 
 	for _, path := range paths {
 		if path == "" {
@@ -187,7 +213,7 @@ func (ls *LiveSync) flush() {
 			default:
 			}
 			select {
-			case ch <- string(payload):
+			case ch <- `{"type":"vault.changed","tree":true,"graph":true,"search":true,"notes":true,"activity":true}`:
 			default:
 			}
 		}
@@ -219,7 +245,13 @@ func (ls *LiveSync) watch(vaultPath string, watcher *fsnotify.Watcher) {
 			if !ok {
 				return
 			}
-			log.Printf("vault watcher error: %v", err)
+			ls.watcherFailure(err)
+			ls.mu.Lock()
+			fn := ls.reconcile
+			ls.mu.Unlock()
+			if fn != nil {
+				fn()
+			}
 		}
 	}
 }
@@ -228,12 +260,26 @@ func (ls *LiveSync) handleWatcherEvent(vaultPath string, watcher *fsnotify.Watch
 	if shouldIgnoreVaultPath(vaultPath, event.Name) {
 		return
 	}
+	ls.mu.Lock()
+	reconcile := ls.reconcile
+	idx := ls.index
+	ls.mu.Unlock()
+	if reconcile != nil {
+		reconcile()
+	}
+	if idx != nil && event.Op&(fsnotify.Create|fsnotify.Remove|fsnotify.Rename) != 0 {
+		if err := idx.Build(vaultPath); err != nil {
+			log.Printf("index reconciliation: %v", err)
+		}
+	}
 
 	if event.Op&fsnotify.Create != 0 {
 		if info, err := os.Stat(event.Name); err == nil && info.IsDir() {
-			_ = ls.addRecursiveWatches(vaultPath, event.Name, watcher)
+			if err := ls.addRecursiveWatches(vaultPath, event.Name, watcher); err != nil {
+				ls.watcherFailure(err)
+			}
 			if relPath, _, ok := normalizeVaultPath(vaultPath, event.Name, false); ok {
-				ls.Notify([]string{relPath}, true, false, false, false)
+				ls.Notify([]string{relPath}, true, true, true, true)
 			}
 			return
 		}
@@ -255,7 +301,7 @@ func (ls *LiveSync) handleWatcherEvent(vaultPath string, watcher *fsnotify.Watch
 	}
 
 	ls.mu.Lock()
-	idx := ls.index
+	idx = ls.index
 	ls.mu.Unlock()
 
 	if idx != nil && isMarkdown {
@@ -270,16 +316,19 @@ func (ls *LiveSync) handleWatcherEvent(vaultPath string, watcher *fsnotify.Watch
 	ls.Notify(
 		[]string{normalizedPath},
 		treeChanged,
-		isMarkdown,
-		isMarkdown,
-		isMarkdown,
+		isMarkdown || treeChanged,
+		isMarkdown || treeChanged,
+		isMarkdown || treeChanged,
 	)
 }
 
 func (ls *LiveSync) addRecursiveWatches(vaultPath string, root string, watcher *fsnotify.Watcher) error {
 	return filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
-			return nil
+			if os.IsNotExist(err) && path != root {
+				return nil
+			}
+			return err
 		}
 		if !d.IsDir() {
 			return nil

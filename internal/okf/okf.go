@@ -10,6 +10,7 @@
 package okf
 
 import (
+	"github.com/iamangus/vitra/internal/links"
 	"regexp"
 	"sort"
 	"strings"
@@ -76,6 +77,8 @@ func Extract(frontmatter map[string]interface{}) Metadata {
 					m.Tags = append(m.Tags, s)
 				}
 			}
+		case []string:
+			m.Tags = append(m.Tags, t...)
 		case string:
 			for _, s := range strings.Split(t, ",") {
 				if s = strings.TrimSpace(s); s != "" {
@@ -85,6 +88,9 @@ func Extract(frontmatter map[string]interface{}) Metadata {
 		}
 	}
 	if v, ok := frontmatter["timestamp"]; ok {
+		if timestamp, ok := v.(time.Time); ok {
+			m.Timestamp = timestamp.UTC().Format(time.RFC3339Nano)
+		}
 		if s, ok := v.(string); ok {
 			m.Timestamp = s
 		}
@@ -170,34 +176,7 @@ var relLinkRegex = regexp.MustCompile(`\[[^\]]*\]\((\.?/)?((?:[^:\]#!][^\]#!]*\.
 // is used to resolve relative links to a bundle-relative concept ID. When
 // basePath is empty, relative links are returned as-is (still .md-stripped).
 func ExtractOKFLinks(body []byte, basePath string) []string {
-	seen := make(map[string]struct{})
-	var links []string
-
-	add := func(p string) {
-		p = strings.TrimSuffix(strings.TrimSpace(p), ".md")
-		if p == "" {
-			return
-		}
-		if _, ok := seen[p]; ok {
-			return
-		}
-		seen[p] = struct{}{}
-		links = append(links, p)
-	}
-
-	for _, m := range absLinkRegex.FindAllStringSubmatch(string(body), -1) {
-		add(m[1])
-	}
-	for _, m := range relLinkRegex.FindAllStringSubmatch(string(body), -1) {
-		p := m[2]
-		if basePath != "" && !strings.HasPrefix(p, "/") {
-			p = strings.TrimSuffix(basePath, "/") + "/" + strings.TrimPrefix(p, "./")
-		}
-		add(p)
-	}
-
-	sort.Strings(links)
-	return links
+	return links.Extract(body, basePath, false)
 }
 
 // FormatTimestamp returns an ISO 8601 timestamp suitable for the `timestamp`

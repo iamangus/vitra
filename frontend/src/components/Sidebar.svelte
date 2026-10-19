@@ -5,6 +5,8 @@
   import FileTree from './FileTree.svelte';
   import Activity from './Activity.svelte';
   import { theme } from '../stores/theme.js';
+  import { focusScope } from '../lib/focus.js';
+  import { flushAffectedDrafts } from '../lib/drafts.js';
 
   const dispatch = createEventDispatcher();
 
@@ -100,7 +102,9 @@
     const newName = prompt('Rename to:', contextMenu.path);
     if (newName && newName !== contextMenu.path) {
       try {
+        await flushAffectedDrafts(contextMenu.path);
         await fileOps.rename(contextMenu.path, newName);
+        navigateAfterRename(contextMenu.path, newName, contextMenu.isDir);
         await loadTree();
       } catch (e) {
         alert('Failed to rename: ' + e.message);
@@ -113,7 +117,9 @@
     if (!contextMenu.path) return;
     if (!confirm('Delete "' + contextMenu.path + '"?')) return;
     try {
+      await flushAffectedDrafts(contextMenu.path);
       await fileOps.delete(contextMenu.path);
+      if (activePath === contextMenu.path || activePath.startsWith(contextMenu.path + '/')) dispatch('home');
       await loadTree();
     } catch (e) {
       alert('Failed to delete: ' + e.message);
@@ -140,11 +146,18 @@
 
   async function doMove(oldPath, newPath) {
     try {
+      await flushAffectedDrafts(oldPath);
       await fileOps.rename(oldPath, newPath);
+      navigateAfterRename(oldPath, newPath, true);
       await loadTree();
     } catch (e) {
       alert('Failed to move: ' + e.message);
     }
+  }
+
+  function navigateAfterRename(oldPath, newPath, isDir) {
+    if (activePath === oldPath) dispatch('navigate', isDir ? newPath : newPath.replace(/\.md$/, ''));
+    else if (activePath.startsWith(oldPath + '/')) dispatch('navigate', newPath + activePath.slice(oldPath.length));
   }
 
   function handleMoveEvent(e) {
@@ -153,8 +166,7 @@
   }
 
   function handleRootDragOver(e) {
-    const sourcePath = e.dataTransfer.getData('text/plain');
-    if (!sourcePath) return;
+    if (!e.dataTransfer.types.includes('text/plain')) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = 'move';
     dragOverRoot = true;
@@ -195,6 +207,8 @@
     };
   });
 </script>
+
+<svelte:window on:keydown={event => { if (event.key === 'Escape') { showNewFolderDialog = false; closeContextMenu(); } }} />
 
 <!-- Floating toggle button when sidebar is collapsed (desktop only) -->
 {#if isCollapsed && !mobile}
@@ -262,7 +276,8 @@
     <div
       class="file-tree"
       class:drag-over-root={dragOverRoot}
-      role="tree"
+      role="navigation"
+      aria-label="Notes"
       on:contextmenu={handleContextMenu}
       on:dragover={handleRootDragOver}
       on:dragleave={handleRootDragLeave}
@@ -276,27 +291,27 @@
 
   <!-- Resize Handle (desktop only) -->
   {#if !mobile}
-    <div class="resize-handle" on:mousedown={startResize}></div>
+    <button type="button" class="resize-handle" role="slider" aria-label="Resize sidebar" aria-orientation="horizontal" aria-valuenow={sidebarWidth} aria-valuemin="200" aria-valuemax="420" on:keydown={event => { if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); sidebarWidth = Math.max(200, Math.min(420, sidebarWidth + (event.key === 'ArrowRight' ? 10 : -10))); } }} on:mousedown={startResize}></button>
   {/if}
 </aside>
 
 <!-- Context Menu -->
 {#if contextMenu.show}
-  <div id="context-menu" style="left: {contextMenu.x}px; top: {contextMenu.y}px;" on:click|stopPropagation>
+  <div id="context-menu" role="dialog" aria-label="File actions" tabindex="-1" use:focusScope style="left: {Math.min(contextMenu.x, Math.max(0, window.innerWidth - 180))}px; top: {Math.min(contextMenu.y, Math.max(0, window.innerHeight - 200))}px;">
     <button on:click={ctxDownload}>Download</button>
     <button on:click={ctxNewNote}>New Note</button>
     <button on:click={ctxRename}>Rename</button>
     <button on:click={ctxDelete} class="danger">Delete</button>
   </div>
-  <div class="backdrop" on:click={closeContextMenu}></div>
+  <button class="backdrop" aria-label="Close file actions" on:click={closeContextMenu}></button>
 {/if}
 
 <!-- New Folder Dialog -->
 {#if showNewFolderDialog}
-  <div class="dialog-overlay" on:click|self={() => showNewFolderDialog = false}>
-    <div class="dialog">
-      <h3 class="dialog-title">New Folder</h3>
-      <input type="text" bind:value={newFolderName} placeholder="folder/name" class="dialog-input" on:keydown={e => e.key === 'Enter' && handleCreateFolder()}>
+  <div class="dialog-overlay" role="presentation">
+    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="new-folder-title" tabindex="-1" use:focusScope>
+      <h3 id="new-folder-title" class="dialog-title">New Folder</h3>
+      <input type="text" aria-label="Folder path" bind:value={newFolderName} placeholder="folder/name" class="dialog-input" on:keydown={e => e.key === 'Enter' && handleCreateFolder()}>
       <div class="dialog-actions">
         <button on:click={() => showNewFolderDialog = false} class="btn-text">Cancel</button>
         <button on:click={handleCreateFolder} class="btn-primary">Create</button>
@@ -491,6 +506,8 @@
   }
 
   .resize-handle {
+    border: 0;
+    padding: 0;
     position: absolute;
     right: -3px;
     top: 0;
@@ -530,6 +547,9 @@
   }
 
   .backdrop {
+    background: transparent;
+    border: 0;
+    padding: 0;
     position: fixed;
     inset: 0;
     z-index: 50;
