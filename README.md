@@ -84,7 +84,7 @@ Unsaved/conflicting editor drafts are retained in **session storage for that bro
 | `POST /api/preview/{path}` | Sanitized preview without frontmatter |
 | `GET /api/status`, `GET /readyz`, `GET /healthz` | Degradation status/liveness |
 
-Note IDs normally omit `.md`; rename/delete accept either form for notes. Directory names remain exact. Markdown links are source-relative; ambiguous WikiLinks should use full vault-relative paths. Moves do not rewrite references in other files.
+Read/save note IDs omit the file extension: ID `example.md` identifies the literal filename `example.md.md`. Rename/delete/download accept actual entry filenames and resolve extensionless IDs when no exact entry exists; the UI always sends actual filenames for these operations to avoid suffix/directory collisions. Directory names remain exact. Markdown links are source-relative; ambiguous WikiLinks should use full vault-relative paths. Moves do not rewrite references in other files.
 
 ## MCP and skills
 

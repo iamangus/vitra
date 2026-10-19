@@ -32,6 +32,7 @@ func walkNotes(vault, scope, skills string, reserved bool, visit func(string, []
 	if _, err := safeVaultPath(vault, scope); err != nil {
 		return err
 	}
+	scope = filepath.Clean(scope)
 	root, err := os.OpenRoot(vault)
 	if err != nil {
 		return err

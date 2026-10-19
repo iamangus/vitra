@@ -20,7 +20,7 @@ Scope: the 36 findings from the project-wide audit, with authentication and mand
 | 10 | Destructive/racy full reindex | Implemented: independent candidate collection and atomic snapshot publication, serialized filesystem mutations, cancellation/error propagation. Concurrent index/search/reindex race test; failed-reindex snapshot preservation test. |
 | 11 | Skills/hidden content embedded | Implemented: shared rooted scan and exclusions in startup, reconciliation and full reindex. Watcher/exclusion integration test; only mock services receive fixture text. |
 | 12 | Missing-note creation UI | Implemented: structured HTTP status errors and 404 handling. API unit test, missing-note browser workflow. |
-| 13 | Extensionless file operations | Implemented: server resolves note IDs versus exact directories. Folder operations test; UI rename/delete/dirty-move workflows. |
+| 13 | Extensionless file operations | Implemented: canonical note IDs, exact directory names, and explicit entry filenames from UI operations avoid suffix collisions. Folder/alias/literal-extension tests; UI rename/delete/dirty-move and neighboring-note preservation workflows. |
 | 14 | Folder downloads | Implemented: resolve entry type before adding note extension; rooted ZIP traversal and safe attachment headers. ZIP regression and browser workflow. |
 | 15 | Stale subtree indexes | Implemented: subtree removal, rooted rebuilds/reconciliation, directory-level invalidations. Folder mutation and external directory-move integration tests. |
 | 16 | Missing external/startup vectors | Implemented: asynchronous startup reconciliation, filesystem-triggered work and periodic retry scans. `TestWatcherReconcilesExternalDirectoriesAndExcludedContent`. |
@@ -53,12 +53,12 @@ Observed on Linux, using Go 1.26.9 and Node 24.22.0 where stated:
 - `go test -race -count=3 ./...`: passed, including real filesystem watcher and streamable-HTTP MCP tests.
 - `go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...`: no vulnerabilities found under Go 1.26.9. Original host toolchain remains Go 1.26.7 with `GOTOOLCHAIN=local`; explicitly select the required toolchain.
 - Darwin/arm64 and Windows/amd64 cross-builds passed; runtime behavior on those platforms is not verified. Windows file moves use exclusive hard-link/unlink semantics; Linux/macOS use native no-replace rename.
-- Frontend `check`: zero errors/warnings; `test`: all seven draft/API/graph/live tests pass; `build`: passing; `npm audit`: zero known vulnerabilities. All ten Chromium workflows pass, including deterministic conflict handling, dirty-note drag/move, and activity updates.
+- Frontend `check`: zero errors/warnings; `test`: all seven draft/API/graph/live tests pass; `build`: passing; `npm audit`: zero known vulnerabilities. All eleven Chromium workflows pass, including deterministic conflict handling, dirty-note drag/move, activity updates, and literal-extension neighboring-note preservation.
 - Earlier complete Chromium run: all eight original workflows passed. A later parallel verification exposed a race in the conflict **test setup**: a clean editor legitimately refreshed to the newer revision before editing. The fixture now intercepts the old-revision save before making the competing update; it does not suppress real application events.
 - Mobile screenshot inspection used a disposable fixture server at 360×740, with measured document width 360 (no horizontal overflow). The OpenChamber browser client was display-only; Chromium automation supplied the interaction evidence.
 - Synthetic snapshot benchmark (384-dimensional fixture embeddings; three iterations; local CPU/filesystem): 100 notes ≈36.9 ms / 5.27 MB allocated per replacement; 1,000 notes ≈146.3 ms / 54.9 MB allocated. These are observations, not service-level guarantees.
 - Synthetic graph preprocessing: 10,000 nodes / 50,000 edges ≈62.3 ms in one local Node 24 test run. Browser rendering/GPU performance at this scale was not benchmarked.
-- Main JS bundle ≈84.1 kB uncompressed after lazy loading versus ≈1.55 MB in the audit build; the separately loaded 3D route remains ≈1.48 MB and triggers Vite's large-chunk advisory.
+- Main JS bundle ≈84.3 kB uncompressed after lazy loading versus ≈1.55 MB in the audit build; the separately loaded 3D route remains ≈1.48 MB and triggers Vite's large-chunk advisory.
 
 ## Remaining boundaries and verification
 

@@ -230,3 +230,51 @@ func TestSanitizedMarkdown(t *testing.T) {
 		t.Fatal(html)
 	}
 }
+
+func TestLiteralExtensionIDsAndCanonicalAliases(t *testing.T) {
+	f := testFS(t)
+	if err := f.CreateNote("same", "first"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.CreateNote("same.md", "second"); err != nil {
+		t.Fatal(err)
+	}
+	first, err := f.ReadNote("same")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := f.ReadNote("same.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Content != "first" || second.Content != "second" {
+		t.Fatal(first.Content, second.Content)
+	}
+	if err := f.RenameNote("same.md.md", "renamed.md.md"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.DeleteNote("renamed.md.md"); err != nil {
+		t.Fatal(err)
+	}
+	first, err = f.ReadNote("same")
+	if err != nil || first.Content != "first" {
+		t.Fatal("wrong note changed", err)
+	}
+	if err := f.CreateFolder("folder.md"); err != nil {
+		t.Fatal(err)
+	}
+	tree, err := f.ListNotes("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tree[0].Path != "folder.md" {
+		t.Fatal(tree)
+	}
+	if err := f.CreateNote("a/./b", "canonical alias"); err != nil {
+		t.Fatal(err)
+	}
+	results, err := f.SearchNotes("canonical alias")
+	if err != nil || len(results) != 1 || results[0].Path != "a/b" {
+		t.Fatal(results, err)
+	}
+}

@@ -116,6 +116,19 @@ test('activity refreshes when a log changes', async ({ page, request }) => {
   await expect(page.getByText('second activity', { exact: true })).toBeVisible();
 });
 
+test('literal extension note names cannot delete the neighboring note', async ({ page, request }) => {
+  await createNote(request, 'Suffix', 'normal note');
+  await createNote(request, 'Suffix.md', 'literal suffix note');
+  await page.goto('/note/Suffix.md');
+  await expect(page.locator('.markdown-content')).toContainText('literal suffix note');
+  await page.locator('a[data-path="Suffix.md"]').click({ button: 'right' });
+  page.once('dialog', dialog => dialog.accept());
+  await page.getByRole('button', { name: 'Delete', exact: true }).click();
+  await expect(page.locator('a[data-path="Suffix.md"]')).toHaveCount(0);
+  expect((await (await request.get('/api/note/Suffix')).json()).content).toBe('normal note');
+  expect((await request.get('/api/note/Suffix.md')).status()).toBe(404);
+});
+
 test('mobile navigation remains reachable', async ({ page }) => {
   await page.setViewportSize({ width: 360, height: 740 });
   await page.goto('/note/B');

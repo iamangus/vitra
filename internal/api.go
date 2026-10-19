@@ -105,7 +105,7 @@ func (fs *FileSystem) requireRevision(w http.ResponseWriter, r *http.Request) bo
 	if r.Header.Get("If-Match") != "" {
 		return true
 	}
-	if _, err := fs.ReadVaultFile(noteName(r.PathValue("path")) + ".md"); err == nil {
+	if _, err := fs.ReadVaultFile(noteID(r.PathValue("path")) + ".md"); err == nil {
 		http.Error(w, "If-Match revision required", http.StatusPreconditionRequired)
 		return false
 	} else if !os.IsNotExist(err) {

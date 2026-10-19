@@ -50,6 +50,8 @@ func noteName(path string) string {
 	return strings.TrimSuffix(filepath.ToSlash(path), ".md")
 }
 
+func noteID(path string) string { return filepath.ToSlash(filepath.Clean(path)) }
+
 func revision(content []byte) string {
 	return fmt.Sprintf(`"%x"`, sha256.Sum256(content))
 }

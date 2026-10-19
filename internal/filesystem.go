@@ -90,7 +90,7 @@ type NoteData struct {
 
 // ReadNote reads, parses and renders a note. Shared between web and MCP layers.
 func (fs *FileSystem) ReadNote(path string) (*NoteData, error) {
-	path = noteName(path)
+	path = noteID(path)
 	content, err := fs.ReadVaultFile(path + ".md")
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -138,7 +138,7 @@ func (fs *FileSystem) SaveNote(path, content, expected string, exclusive bool) (
 }
 
 func (fs *FileSystem) saveNoteLocked(path, content, expected string, exclusive bool) (string, error) {
-	path = noteName(path)
+	path = noteID(path)
 	if path == "" || len(content) > maxBodySize {
 		return "", ErrInvalidPath
 	}
@@ -168,7 +168,7 @@ func (fs *FileSystem) saveNoteLocked(path, content, expected string, exclusive b
 // CreateNote creates a new note if it doesn't already exist.
 func (fs *FileSystem) CreateNote(path, content string) error {
 	if content == "" {
-		content = EmitFrontmatter(map[string]interface{}{"type": "Note", "title": filepath.Base(noteName(path))}) + "\n"
+		content = EmitFrontmatter(map[string]interface{}{"type": "Note", "title": filepath.Base(noteID(path))}) + "\n"
 	}
 	_, err := fs.SaveNote(path, content, "", true)
 	return err
@@ -702,7 +702,7 @@ func (fs *FileSystem) UpdateNoteMetadata(path string, updates map[string]interfa
 func (fs *FileSystem) PatchNote(path string, updates map[string]interface{}, replacement *string, expected string) (string, error) {
 	fs.mutationMu.Lock()
 	defer fs.mutationMu.Unlock()
-	content, err := fs.ReadVaultFile(noteName(path) + ".md")
+	content, err := fs.ReadVaultFile(noteID(path) + ".md")
 	if err != nil {
 		return "", err
 	}

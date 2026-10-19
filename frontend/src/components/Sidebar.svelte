@@ -103,7 +103,7 @@
     if (newName && newName !== contextMenu.path) {
       try {
         await flushAffectedDrafts(contextMenu.path);
-        await fileOps.rename(contextMenu.path, newName);
+        await fileOps.rename(entryPath(contextMenu.path, contextMenu.isDir), entryPath(newName, contextMenu.isDir));
         navigateAfterRename(contextMenu.path, newName, contextMenu.isDir);
         await loadTree();
       } catch (e) {
@@ -118,7 +118,7 @@
     if (!confirm('Delete "' + contextMenu.path + '"?')) return;
     try {
       await flushAffectedDrafts(contextMenu.path);
-      await fileOps.delete(contextMenu.path);
+      await fileOps.delete(entryPath(contextMenu.path, contextMenu.isDir));
       if (activePath === contextMenu.path || activePath.startsWith(contextMenu.path + '/')) dispatch('home');
       await loadTree();
     } catch (e) {
@@ -140,14 +140,15 @@
 
   function ctxDownload() {
     if (!contextMenu.path) return;
-    files.download(contextMenu.path);
+    files.download(entryPath(contextMenu.path, contextMenu.isDir));
     closeContextMenu();
   }
 
   async function doMove(oldPath, newPath) {
     try {
       await flushAffectedDrafts(oldPath);
-      await fileOps.rename(oldPath, newPath);
+      const isDir = findNode(treeData, oldPath)?.IsDir ?? false;
+      await fileOps.rename(entryPath(oldPath, isDir), entryPath(newPath, isDir));
       navigateAfterRename(oldPath, newPath, true);
       await loadTree();
     } catch (e) {
@@ -156,8 +157,18 @@
   }
 
   function navigateAfterRename(oldPath, newPath, isDir) {
-    if (activePath === oldPath) dispatch('navigate', isDir ? newPath : newPath.replace(/\.md$/, ''));
+    if (activePath === oldPath) dispatch('navigate', newPath);
     else if (activePath.startsWith(oldPath + '/')) dispatch('navigate', newPath + activePath.slice(oldPath.length));
+  }
+
+  function entryPath(path, isDir) { return isDir ? path : path + '.md'; }
+
+  function findNode(nodes, path) {
+    for (const node of nodes) {
+      if (node.Path === path) return node;
+      const child = node.Children && findNode(node.Children, path);
+      if (child) return child;
+    }
   }
 
   function handleMoveEvent(e) {

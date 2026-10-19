@@ -28,7 +28,6 @@
   checkMobile();
 
   function navigateToNote(path) {
-    path = path.replace(/\.md$/, '');
     currentPath = path;
     currentView = 'note';
     window.history.pushState({}, '', `/note/${encodeURIComponent(path)}`);
