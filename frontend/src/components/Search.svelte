@@ -1,416 +1,371 @@
 <script>
-  import { createEventDispatcher, onMount } from 'svelte';
-  import { search } from '../lib/api.js';
-  import { subscribeToLiveUpdates } from '../lib/live.js';
-
+  import { createEventDispatcher, onMount } from "svelte";
+  import { search } from "../lib/api.js";
+  import { subscribeToLiveUpdates } from "../lib/live.js";
+  import Icon from "./Icon.svelte";
+  import EmptyState from "./EmptyState.svelte";
+  import HighlightedText from "./HighlightedText.svelte";
+  export let query = "";
   const dispatch = createEventDispatcher();
-
-  export let query = '';
-
-  let mode = 'fulltext';
+  let inputValue = query;
+  let mode = "fulltext";
   let results = [];
   let loading = false;
-  let semanticError = '';
-  let liveSearchTimeout;
-  let requestGeneration = 0;
-
-  $: if (query !== undefined) {
-    performSearch();
-  }
+  let error = "";
+  let input;
+  let generation = 0;
+  let controller;
+  let reloadTimer;
+  $: inputValue = query;
+  $: if (query !== undefined) performSearch();
 
   async function performSearch() {
-    const generation = ++requestGeneration;
-    if (!query) {
+    const id = ++generation;
+    controller?.abort();
+    controller = new AbortController();
+    const signal = controller.signal;
+    error = "";
+    if (!query.trim()) {
       results = [];
+      loading = false;
       return;
     }
     loading = true;
-    semanticError = '';
     try {
-      if (mode === 'semantic') {
-        const response = await search.semantic(query);
-        if (generation === requestGeneration) results = response;
-      } else {
-        const response = await search.query(query);
-        if (generation === requestGeneration) results = response;
-      }
-    } catch (e) {
-      if (generation !== requestGeneration) return;
-      console.error('Search failed:', e);
-      if (mode === 'semantic') {
-        semanticError = e.message || 'Semantic search unavailable';
-        results = [];
-      } else {
+      const response =
+        mode === "semantic"
+          ? await search.semantic(query, 12, signal)
+          : await search.query(query, signal);
+      if (id === generation) results = response || [];
+    } catch (cause) {
+      if (id === generation && cause.name !== "AbortError") {
+        error =
+          mode === "semantic"
+            ? "Semantic search is unavailable right now. You can still find exact words with full-text search."
+            : "Your search could not finish. Try again when your connection is restored.";
         results = [];
       }
     } finally {
-      if (generation === requestGeneration) loading = false;
+      if (id === generation) loading = false;
     }
   }
 
-  function switchMode(newMode) {
-    if (mode === newMode) return;
-    mode = newMode;
-    if (query) performSearch();
+  function submit() {
+    query = inputValue.trim();
+    dispatch("query", query);
+    window.history.replaceState(
+      {},
+      "",
+      "/search" + (query ? "?q=" + encodeURIComponent(query) : ""),
+    );
   }
-
-  function handleSubmit(e) {
-    e.preventDefault();
-    const formData = new FormData(e.target);
-    query = String(formData.get('q') || '');
-    window.history.pushState({}, '', `/search?q=${encodeURIComponent(query)}`);
+  function switchMode(value) {
+    if (mode !== value) {
+      mode = value;
+      performSearch();
+    }
+  }
+  function excerpt(result) {
+    return (
+      result.snippet ||
+      (result.chunk || "")
+        .replace(/^Note:.*?\| File:.*?\| Section:.*?\|\s*/, "")
+        .slice(0, 260)
+    );
   }
 
   onMount(() => {
+    input?.focus();
     const unsubscribe = subscribeToLiveUpdates((event) => {
-      if (!event.search || !query) {
-        return;
+      if (event.search && query) {
+        clearTimeout(reloadTimer);
+        reloadTimer = setTimeout(performSearch, 250);
       }
-
-      clearTimeout(liveSearchTimeout);
-      requestGeneration++;
-      liveSearchTimeout = setTimeout(() => {
-        performSearch();
-      }, 250);
     });
-
     return () => {
-      clearTimeout(liveSearchTimeout);
+      generation++;
+      controller?.abort();
+      clearTimeout(reloadTimer);
       unsubscribe();
     };
   });
 </script>
 
-<div class="search-page">
-  <div class="search-container">
-    <h1 class="search-title">Search</h1>
-
-    <form on:submit={handleSubmit} class="search-form">
-      <div class="search-input-wrap">
-        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="search-icon">
-          <circle cx="11" cy="11" r="8"/>
-          <path d="m21 21-4.3-4.3"/>
-        </svg>
-        <input
-          type="text"
-          name="q"
-          value={query}
-          placeholder="Search notes..."
-          class="search-input"
-        >
-        <button type="submit" class="search-btn">Search</button>
-      </div>
-      <div class="mode-toggle" role="group" aria-label="Search mode">
-        <button
-          type="button"
-          class:active={mode === 'fulltext'}
-          on:click={() => switchMode('fulltext')}
-        >Full-text</button>
-        <button
-          type="button"
-          class:active={mode === 'semantic'}
-          on:click={() => switchMode('semantic')}
-        >Semantic</button>
-      </div>
+<div class="page">
+  <div class="page-inner search-page">
+    <div class="eyebrow">Find a connection</div>
+    <h1>What are you looking for?</h1>
+    <p class="page-description">
+      Find the exact words, or explore the ideas behind them.
+    </p>
+    <form class="search-form" on:submit|preventDefault={submit}>
+      <Icon name="search" size={21} /><input
+        id="global-search-input"
+        aria-label="Search notes"
+        bind:this={input}
+        bind:value={inputValue}
+        maxlength="512"
+        autocomplete="off"
+        placeholder="Search your knowledge…"
+      /><button class="button primary" type="submit">Search</button>
     </form>
-
-    {#if query}
-      <p class="search-meta">
-        {results.length} result{results.length !== 1 ? 's' : ''} for "{query}"
-      </p>
-
-      {#if mode === 'semantic' && semanticError}
-        <div class="search-error">{semanticError}</div>
-      {/if}
-
-      {#if loading}
-        <div class="search-loading">
-          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="spin">
-            <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
-          </svg>
-          <span>Searching...</span>
+    <div class="search-options">
+      <div class="segmented" role="group" aria-label="Search mode">
+        <button
+          aria-pressed={mode === "fulltext"}
+          on:click={() => switchMode("fulltext")}>Full-text</button
+        ><button
+          aria-pressed={mode === "semantic"}
+          on:click={() => switchMode("semantic")}>Semantic</button
+        >
+      </div>
+      <span
+        >{mode === "fulltext"
+          ? "Match words in your notes"
+          : "Find related meaning and ideas"}</span
+      >
+    </div>
+    {#if error}<div class="search-error" role="alert">
+        <Icon name="warning" />
+        <div>
+          <strong>Search needs a moment</strong>
+          <p>{error}</p>
+          <button class="button" on:click={performSearch}>Try again</button
+          >{#if mode === "semantic"}<button
+              class="button quiet"
+              on:click={() => switchMode("fulltext")}>Use full-text</button
+            >{/if}
         </div>
-      {:else if results.length > 0}
-        <div class="search-results">
-          {#each results as result}
-            <a
-              href="/note/{result.path}"
-              class="search-result"
-              on:click|preventDefault={() => dispatch('navigate', result.path)}
-            >
-              <div class="result-icon">
-                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/>
-                  <polyline points="14 2 14 8 20 8"/>
-                </svg>
+      </div>
+    {:else if loading}<div
+        class="results-skeleton"
+        aria-busy="true"
+        aria-label="Searching notes"
+      >
+        {#each [1, 2, 3] as item}<div>
+            <div class="skeleton" style="width:45%;height:16px"></div>
+            <div class="skeleton" style="width:90%;height:12px"></div>
+            <div class="skeleton" style="width:70%;height:12px"></div>
+          </div>{/each}
+      </div>
+    {:else if query && results.length}<div
+        class="results-heading"
+        role="status"
+      >
+        {results.length} result{results.length === 1 ? "" : "s"} for
+        <strong>“{query}”</strong>
+      </div>
+      <div class="search-results">
+        {#each results as result}<a
+            href={"/note/" + encodeURIComponent(result.path)}
+            on:click|preventDefault={() => dispatch("navigate", result.path)}
+            ><span class="result-icon"><Icon name="note" size={19} /></span>
+            <div class="result-body">
+              <div class="result-path">
+                {result.path.includes("/")
+                  ? result.path.slice(0, result.path.lastIndexOf("/"))
+                  : "Vault root"}{#if result.type}<span>
+                    · {result.type}</span
+                  >{/if}
               </div>
-              <div class="result-body">
-                <span class="result-title">{result.title}</span>
-                {#if result.path.includes('/')}
-                  <span class="result-path">{result.path}</span>
-                {/if}
-                {#if mode === 'semantic' && result.distance != null}
-                  <span class="result-score">{(1 - result.distance).toFixed(2)} match</span>
-                {/if}
-              </div>
-              {#if mode === 'semantic' && result.heading}
-                <span class="result-heading">{result.heading}</span>
-              {/if}
-              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="result-arrow">
-                <path d="m9 18 6-6-6-6"/>
-              </svg>
-            </a>
-          {/each}
+              <h2><HighlightedText text={result.title} {query} /></h2>
+              {#if excerpt(result)}<p>
+                  <HighlightedText text={excerpt(result)} {query} />
+                </p>{/if}{#if result.heading}<span class="result-section"
+                  >{result.heading}</span
+                >{/if}
+            </div>
+            <span class="result-arrow"><Icon name="arrow" size={17} /></span></a
+          >{/each}
+      </div>
+    {:else if query}<EmptyState
+        icon="search"
+        title="No notes found, yet"
+        message="Try a shorter phrase, a different word, or switch search modes. Your next connection might be one search away."
+        compact
+      />
+    {:else}<div class="search-guide">
+        <Icon name="search" size={26} />
+        <h2>A name, a phrase, an idea.</h2>
+        <p>
+          Full-text finds the words you remember.<br />Semantic search helps
+          when you remember the meaning.
+        </p>
+        <div>
+          <span class="tag-chip">Project names</span><span class="tag-chip"
+            >Technical concepts</span
+          ><span class="tag-chip">A line you remember</span>
         </div>
-      {:else if !(mode === 'semantic' && semanticError)}
-        <div class="search-empty">
-          <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="empty-icon">
-            <circle cx="11" cy="11" r="8"/>
-            <path d="m21 21-4.3-4.3"/>
-          </svg>
-          <p>No results found</p>
-        </div>
-      {/if}
-    {/if}
+      </div>{/if}
   </div>
 </div>
 
 <style>
   .search-page {
-    flex: 1;
-    overflow-y: auto;
-    padding: 2rem 1.5rem;
+    max-width: 820px;
   }
-
-  .search-container {
-    max-width: 640px;
-    margin: 0 auto;
-  }
-
-  .search-title {
-    font-size: 1.5rem;
-    font-weight: 700;
-    margin: 0 0 1.5rem;
-    letter-spacing: -0.02em;
-  }
-
   .search-form {
-    margin-bottom: 1.5rem;
-  }
-
-  .search-input-wrap {
     display: flex;
     align-items: center;
-    gap: 0.5rem;
+    gap: 13px;
+    padding: 8px 9px 8px 17px;
+    border: 1px solid var(--border-strong);
+    border-radius: 10px;
     background: var(--bg-elevated);
-    border: 1px solid var(--border-color);
-    border-radius: var(--radius);
-    padding: 0.5rem 0.75rem;
-    transition: border-color 0.15s, box-shadow 0.15s;
+    box-shadow: var(--shadow-sm);
   }
-
-  .search-input-wrap:focus-within {
+  .search-form:focus-within {
     border-color: var(--primary);
-    box-shadow: 0 0 0 3px var(--primary-soft);
+    outline: 2px solid var(--primary-soft);
   }
-
-  .search-icon {
-    color: var(--color-faint);
-    flex-shrink: 0;
-  }
-
-  .search-input {
-    flex: 1;
-    border: none;
-    outline: none;
-    background: transparent;
-    color: var(--color);
-    font-size: 0.9375rem;
-    padding: 0.25rem 0;
-  }
-
-  .search-input::placeholder {
-    color: var(--color-faint);
-  }
-
-  .search-btn {
-    padding: 0.375rem 0.875rem;
-    border-radius: var(--radius-sm);
-    font-size: 0.8125rem;
-    font-weight: 600;
-    background: var(--primary);
-    color: var(--primary-color);
-    border: none;
-    cursor: pointer;
-    transition: background 0.15s;
-    flex-shrink: 0;
-  }
-
-  .search-btn:hover {
-    background: var(--primary-hover);
-  }
-
-  .search-meta {
-    font-size: 0.8125rem;
+  .search-form > :first-child {
     color: var(--color-muted);
-    margin: 0 0 1rem;
   }
-
-  .search-loading {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    color: var(--color-faint);
-    font-size: 0.875rem;
-  }
-
-  .spin {
-    animation: spin 1s linear infinite;
-  }
-
-  @keyframes spin {
-    from { transform: rotate(0deg); }
-    to { transform: rotate(360deg); }
-  }
-
-  .search-results {
-    display: flex;
-    flex-direction: column;
-    gap: 0.375rem;
-  }
-
-  .search-result {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    padding: 0.875rem 1rem;
-    border-radius: var(--radius);
-    background: var(--bg-elevated);
-    border: 1px solid var(--border-color);
-    text-decoration: none;
-    color: inherit;
-    transition: all 0.15s;
-  }
-
-  .search-result:hover {
-    border-color: var(--border-strong);
-    background: var(--hover-bg);
-  }
-
-  .result-icon {
-    color: var(--color-faint);
-    flex-shrink: 0;
-  }
-
-  .result-body {
-    flex: 1;
+  input {
     min-width: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 0.125rem;
+    flex: 1;
+    padding: 10px 0;
+    border: 0;
+    background: none;
+    font-size: 15px;
+    outline: 0;
   }
-
-  .result-title {
+  input::placeholder {
+    color: var(--color-faint);
+  }
+  .search-options {
+    display: flex;
+    align-items: center;
+    gap: 15px;
+    margin: 16px 0 32px;
+  }
+  .search-options > span {
+    color: var(--color-muted);
+    font-size: 11px;
+  }
+  .results-heading {
+    font-size: 12px;
+    color: var(--color-muted);
+    margin-bottom: 8px;
+  }
+  .results-heading strong {
+    color: var(--color);
     font-weight: 500;
-    font-size: 0.9375rem;
+  }
+  .search-results a {
+    display: flex;
+    gap: 16px;
+    padding: 24px 8px;
+    border-bottom: 1px solid var(--border-color);
+    text-decoration: none;
     color: var(--color);
   }
-
-  .result-path {
-    font-size: 0.75rem;
-    color: var(--color-faint);
+  .search-results a:hover {
+    background: var(--hover-bg);
+    border-radius: 8px;
   }
-
-  .result-arrow {
-    color: var(--color-faint);
-    flex-shrink: 0;
-    transition: transform 0.15s;
-  }
-
-  .search-result:hover .result-arrow {
-    transform: translateX(2px);
-    color: var(--color-muted);
-  }
-
-  .search-empty {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 0.75rem;
-    padding: 3rem 1rem;
-    text-align: center;
-  }
-
-  .search-empty .empty-icon {
-    color: var(--color-faint);
-    opacity: 0.5;
-  }
-
-  .search-empty p {
-    margin: 0;
-    color: var(--color-muted);
-    font-size: 0.9375rem;
-  }
-
-  .mode-toggle {
-    display: inline-flex;
-    margin-top: 0.5rem;
+  .result-icon {
+    display: grid;
+    place-items: center;
+    width: 36px;
+    height: 40px;
     border: 1px solid var(--border-color);
-    border-radius: var(--radius-sm);
-    overflow: hidden;
-  }
-
-  .mode-toggle button {
-    background: transparent;
-    border: none;
-    padding: 0.25rem 0.75rem;
-    font-size: 0.75rem;
-    color: var(--color-muted);
-    cursor: pointer;
-    transition: background 0.15s, color 0.15s;
-  }
-
-  .mode-toggle button:not(:last-child) {
-    border-right: 1px solid var(--border-color);
-  }
-
-  .mode-toggle button.active {
-    background: var(--primary);
-    color: var(--primary-color);
-  }
-
-  .result-score {
-    font-size: 0.6875rem;
-    color: var(--color-faint);
-  }
-
-  .result-heading {
-    font-size: 0.6875rem;
-    color: var(--color-faint);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    max-width: 8rem;
-  }
-
-  .search-error {
-    font-size: 0.8125rem;
-    color: var(--danger, #dc2626);
+    border-radius: 7px;
     background: var(--bg-elevated);
-    border: 1px solid var(--border-color);
-    border-radius: var(--radius-sm);
-    padding: 0.5rem 0.75rem;
-    margin-bottom: 1rem;
+    color: var(--color-muted);
+    flex-shrink: 0;
   }
-
-  /* Mobile */
+  .result-body {
+    min-width: 0;
+    flex: 1;
+  }
+  .result-path,
+  .result-section {
+    display: block;
+    font-size: 11px;
+    color: var(--color-muted);
+    overflow-wrap: anywhere;
+  }
+  h2 {
+    font-size: 17px;
+    font-weight: 550;
+    letter-spacing: -0.4px;
+    margin: 7px 0 9px;
+    overflow-wrap: anywhere;
+  }
+  .result-body p {
+    font-size: 13px;
+    line-height: 1.8;
+    color: var(--color-muted);
+    margin: 0 0 8px;
+    overflow-wrap: anywhere;
+  }
+  .result-arrow {
+    padding-top: 20px;
+    color: var(--color-muted);
+  }
+  .search-error {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 20px;
+    background: var(--warning-bg);
+    color: var(--warning);
+    border-radius: 10px;
+  }
+  .search-error p {
+    font-size: 13px;
+    line-height: 1.7;
+  }
+  .search-guide {
+    text-align: center;
+    color: var(--color-muted);
+    padding: 60px 16px;
+  }
+  .search-guide > div {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 8px;
+    margin-top: 22px;
+  }
+  .search-guide h2 {
+    color: var(--color);
+    font-size: 20px;
+    margin-top: 20px;
+  }
+  .search-guide p {
+    font-size: 13px;
+    line-height: 1.8;
+  }
+  .results-skeleton > div {
+    display: grid;
+    gap: 14px;
+    padding: 30px 12px;
+    border-bottom: 1px solid var(--border-color);
+  }
   @media (max-width: 768px) {
-    .search-page {
-      padding: 1.25rem;
+    input {
+      font-size: 16px;
     }
-
-    .search-title {
-      font-size: 1.25rem;
+    .search-options {
+      align-items: flex-start;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .search-form {
+      padding-left: 12px;
+      gap: 9px;
+    }
+    .result-icon {
+      display: none;
+    }
+    .search-results a {
+      gap: 8px;
+      padding: 22px 0;
+    }
+    .result-arrow {
+      display: none;
     }
   }
 </style>

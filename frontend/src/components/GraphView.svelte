@@ -1,511 +1,467 @@
 <script>
-  import { createEventDispatcher, onMount, untrack } from 'svelte';
-  import ForceGraph3D from '3d-force-graph';
-  import * as THREE from 'three';
-  import { graph } from '../lib/api.js';
-  import { subscribeToLiveUpdates } from '../lib/live.js';
-  import { theme } from '../stores/theme.js';
-  import { preprocessGraph as preprocessData, tooltipLabel } from '../lib/graph.js';
-
+  import { createEventDispatcher } from "svelte";
+  import GraphCanvas from "./GraphCanvas.svelte";
+  import Icon from "./Icon.svelte";
+  import EmptyState from "./EmptyState.svelte";
   const dispatch = createEventDispatcher();
+  let canvas;
+  let nodes = [];
+  let links = [];
+  let selected = null;
+  let query = "";
+  let type = "all";
+  let showList = false;
+  let labels = false;
+  let loading = true;
+  let error = "";
+  let canvasError = "";
+  $: types = [...new Set(nodes.map((node) => node.type))].sort();
+  $: matching = nodes.filter(
+    (node) =>
+      (type === "all" || node.type === type) &&
+      (node.title + " " + node.id).toLowerCase().includes(query.toLowerCase()),
+  );
+  $: connections = selected
+    ? links.filter(
+        (link) =>
+          link.sourceId === selected.id || link.targetId === selected.id,
+      ).length
+    : 0;
 
-  let container = $state(null);
-  let loading = $state(true);
-  let error = $state(null);
-  let selectedNodeId = $state(null);
-  let hoverNodeId = $state(null);
-  let showAllLabels = $state(false);
-  let nodeCount = $state(0);
-  let linkCount = $state(0);
-  let hasData = $state(false);
-
-  let graphInstance = null;
-  let graphDataObj = { nodes: [], links: [] };
-  let _selectedId = null;
-  let cachedSelectedConnected = new Set();
-  let _hoverId = null;
-  let cachedHoverConnected = new Set();
-  let graphReloadTimeout = null;
-  let themeUnsub = null;
-  let labelSprites = null;
-  let isDarkMode = $state(false);
-  let disposed = false;
-  let graphGeneration = 0;
-
-  isDarkMode = isDark();
-
-  onMount(() => {
-    showAllLabels = localStorage.getItem('graphShowAllLabels') === 'true';
-    loadGraph();
-
-    const liveUnsub = subscribeToLiveUpdates((event) => {
-      if (!event.graph) return;
-      clearTimeout(graphReloadTimeout);
-      graphReloadTimeout = setTimeout(() => loadGraph(true), 250);
-    });
-
-    themeUnsub = theme.subscribe(() => {
-      if (graphInstance) updateTheme();
-    });
-
-    return () => {
-      disposed = true;
-      graphGeneration++;
-      clearTimeout(graphReloadTimeout);
-      liveUnsub();
-      if (themeUnsub) themeUnsub();
-    };
-  });
-
-  $effect(() => {
-    if (!container) return;
-    return untrack(() => {
-    if (graphInstance) return;
-
-    labelSprites = new Map();
-
-    graphInstance = new ForceGraph3D(container)
-      .nodeId('id')
-      .linkSource('sourceId')
-      .linkTarget('targetId')
-      .backgroundColor(isDark() ? '#0a0a0c' : '#fafafa')
-      .nodeLabel(node => tooltipLabel(node))
-      .nodeVal('val')
-      .nodeColor(node => getNodeColor(node))
-      .linkColor(link => getLinkColor(link))
-      .linkWidth(1)
-      .nodeRelSize(6)
-      .nodeResolution(24)
-      .nodeThreeObject(makeLabelSprite)
-      .nodeThreeObjectExtend(true)
-      .onNodeClick(handleNodeClick)
-      .onNodeHover(handleNodeHover)
-      .onBackgroundClick(() => { selectedNodeId = null; refreshRender(); })
-      .enableNodeDrag(true)
-      .showNavInfo(false)
-      .warmupTicks(30)
-      .d3VelocityDecay(0.3)
-      .d3AlphaDecay(0.015);
-
-    graphInstance.d3Force('charge').strength(-80);
-
-    if (graphDataObj.nodes.length > 0) {
-      graphInstance.graphData(graphDataObj);
-    }
-    const resize = () => {
-      if (graphInstance && container) graphInstance.width(container.clientWidth).height(container.clientHeight);
-    };
-    const observer = new ResizeObserver(resize);
-    observer.observe(container);
-    resize();
-    return () => {
-      observer.disconnect();
-      disposeLabels();
-      graphInstance?._destructor();
-      graphInstance = null;
-    };
-    });
-  });
-
-  function disposeLabels() {
-    if (!labelSprites) return;
-    for (const sprite of labelSprites.values()) { sprite.material.map?.dispose(); sprite.material.dispose(); }
-    labelSprites.clear();
+  function received(event) {
+    nodes = event.detail.nodes;
+    links = event.detail.links;
+    loading = false;
+    error = "";
+    if (selected)
+      selected = nodes.find((node) => node.id === selected.id) || null;
+    canvas?.filterByType(type);
   }
-
-  function isDark() {
-    return document.documentElement.classList.contains('dark');
+  function select(node) {
+    canvas?.selectNode(node.id);
+    selected = node;
+    showList = false;
+    query = "";
   }
-
-  function getSelectedConnected() {
-    if (selectedNodeId === _selectedId) return cachedSelectedConnected;
-    _selectedId = selectedNodeId;
-    cachedSelectedConnected = new Set();
-    if (!selectedNodeId) return cachedSelectedConnected;
-    cachedSelectedConnected.add(selectedNodeId);
-    for (const link of graphDataObj.links) {
-      if (link.sourceId === selectedNodeId) cachedSelectedConnected.add(link.targetId);
-      else if (link.targetId === selectedNodeId) cachedSelectedConnected.add(link.sourceId);
-    }
-    return cachedSelectedConnected;
-  }
-
-  function getHoverConnected() {
-    if (hoverNodeId === _hoverId) return cachedHoverConnected;
-    _hoverId = hoverNodeId;
-    cachedHoverConnected = new Set();
-    if (!hoverNodeId) return cachedHoverConnected;
-    cachedHoverConnected.add(hoverNodeId);
-    for (const link of graphDataObj.links) {
-      if (link.sourceId === hoverNodeId) cachedHoverConnected.add(link.targetId);
-      else if (link.targetId === hoverNodeId) cachedHoverConnected.add(link.sourceId);
-    }
-    return cachedHoverConnected;
-  }
-
-  function getNodeColor(node) {
-    const dark = isDark();
-    const selConn = getSelectedConnected();
-    const hovConn = getHoverConnected();
-    const base = typeColors[node.type || 'Note'] || typeColors['Note'];
-    if (node.id === selectedNodeId) return dark ? '#c084fc' : '#6d28d9';
-    if (node.id === hoverNodeId) return dark ? '#c084fc' : '#6d28d9';
-    if (selConn.has(node.id)) return dark ? lighten(base, 0.85) : darken(base, 0.7);
-    if (hovConn.has(node.id)) return dark ? lighten(base, 0.85) : darken(base, 0.7);
-    if (selectedNodeId) return dark ? 'rgba(168, 85, 247, 0.28)' : 'rgba(124, 58, 237, 0.28)';
-    return base;
-  }
-
-  const typeColors = {
-    'Note':       'rgba(124, 58, 237, 0.82)',
-    'Metric':     'rgba(59, 130, 246, 0.82)',
-    'Runbook':    'rgba(239, 68, 68, 0.82)',
-    'API':        'rgba(34, 197, 94, 0.82)',
-    'Table':      'rgba(245, 158, 11, 0.82)',
-    'Skill':      'rgba(168, 85, 247, 0.82)',
-    'Definition': 'rgba(20, 184, 166, 0.82)',
-    'Reference':  'rgba(236, 72, 153, 0.82)',
-  };
-
-  function lighten(rgba, amt) {
-    const m = rgba.match(/[\d.]+/g);
-    if (!m || m.length < 4) return rgba;
-    const [r, g, b, a] = [parseFloat(m[0]), parseFloat(m[1]), parseFloat(m[2]), parseFloat(m[3])];
-    return `rgba(${Math.min(255, r * amt)}, ${Math.min(255, g * amt)}, ${Math.min(255, b * amt)}, ${a})`;
-  }
-
-  function darken(rgba, amt) {
-    const m = rgba.match(/[\d.]+/g);
-    if (!m || m.length < 4) return rgba;
-    const [r, g, b, a] = [parseFloat(m[0]), parseFloat(m[1]), parseFloat(m[2]), parseFloat(m[3])];
-    return `rgba(${Math.floor(r * amt)}, ${Math.floor(g * amt)}, ${Math.floor(b * amt)}, ${a})`;
-  }
-
-  function getLinkColor(link) {
-    const dark = isDark();
-    const selConn = getSelectedConnected();
-    const hovConn = getHoverConnected();
-    const touchesHover = hovConn.has(link.sourceId) && hovConn.has(link.targetId);
-    const touchesSelection = selConn.has(link.sourceId) && selConn.has(link.targetId);
-    if (touchesHover) return dark ? 'rgba(192, 132, 252, 0.78)' : 'rgba(109, 40, 217, 0.75)';
-    if (touchesSelection) return dark ? 'rgba(168, 85, 247, 0.6)' : 'rgba(124, 58, 237, 0.6)';
-    if (selectedNodeId) return dark ? 'rgba(139, 139, 152, 0.06)' : 'rgba(161, 161, 171, 0.08)';
-    return dark ? 'rgba(139, 139, 152, 0.25)' : 'rgba(161, 161, 171, 0.28)';
-  }
-
-  function makeLabelSprite(node) {
-    const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d');
-    const text = String(node.title || '').slice(0, 240);
-    const fontSize = 128;
-    ctx.font = `bold ${fontSize}px -apple-system, system-ui, sans-serif`;
-    const metrics = ctx.measureText(text);
-    const padding = fontSize * 0.3;
-    canvas.width = metrics.width + padding * 2;
-    canvas.height = fontSize * 1.5;
-
-    const dark = isDarkMode;
-    ctx.font = `bold ${fontSize}px -apple-system, system-ui, sans-serif`;
-    ctx.textBaseline = 'middle';
-    ctx.fillStyle = dark ? 'rgba(212, 180, 252, 0.92)' : 'rgba(76, 29, 149, 0.88)';
-    ctx.fillText(text, padding, canvas.height / 2);
-
-    const texture = new THREE.CanvasTexture(canvas);
-    texture.minFilter = THREE.LinearFilter;
-    texture.generateMipmaps = false;
-    const material = new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false, depthWrite: false });
-    const sprite = new THREE.Sprite(material);
-    const aspect = canvas.width / canvas.height;
-    const labelHeight = 10;
-    sprite.scale.set(labelHeight * aspect, labelHeight, 1);
-    const radius = Math.cbrt((node.val || 1) * 6);
-    sprite.position.set(0, radius + 4, 0);
-    sprite.renderOrder = 999;
-    sprite.visible = false;
-    labelSprites.set(node.id, sprite);
-    return sprite;
-  }
-
-  function shouldShowLabel(id) {
-    if (showAllLabels) return true;
-    if (id === selectedNodeId || id === hoverNodeId) return true;
-    const selConn = getSelectedConnected();
-    const hovConn = getHoverConnected();
-    if (selConn.has(id) || hovConn.has(id)) return true;
-    return false;
-  }
-
-  function refreshRender() {
-    if (!graphInstance) return;
-    graphInstance.nodeColor(node => getNodeColor(node));
-    graphInstance.linkColor(link => getLinkColor(link));
-    if (labelSprites) {
-      for (const [id, sprite] of labelSprites) {
-        sprite.visible = shouldShowLabel(id);
-      }
+  function changeType(value) {
+    type = value;
+    canvas?.filterByType(type);
+    if (selected && type !== "all" && selected.type !== type) {
+      selected = null;
+      canvas?.clearSelection();
     }
   }
-
-  function handleNodeClick(node, event) {
-    if (!node) {
-      selectedNodeId = null;
-      refreshRender();
-      return;
-    }
-    if (selectedNodeId === node.id) {
-      dispatch('navigate', node.id);
-      return;
-    }
-    selectedNodeId = node.id;
-    refreshRender();
-  }
-
-  function handleNodeHover(node) {
-    hoverNodeId = node ? node.id : null;
-    refreshRender();
-  }
-
-  function updateTheme() {
-    if (!graphInstance) return;
-    isDarkMode = isDark();
-    graphInstance.backgroundColor(isDarkMode ? '#0a0a0c' : '#fafafa');
-    disposeLabels();
-    labelSprites = new Map();
-    graphInstance.nodeThreeObject(makeLabelSprite);
-    if (graphDataObj.nodes.length > 0) {
-      graphInstance.graphData(graphDataObj);
-      setTimeout(() => refreshRender(), 100);
-    } else {
-      graphInstance.refresh();
-    }
-  }
-
-  function resetView() {
-    if (!graphInstance) return;
-    graphInstance.zoomToFit(400, 35);
-  }
-
-  function toggleAllLabels() {
-    showAllLabels = !showAllLabels;
-    localStorage.setItem('graphShowAllLabels', showAllLabels ? 'true' : 'false');
-    if (labelSprites) {
-      for (const [id, sprite] of labelSprites) {
-        sprite.visible = shouldShowLabel(id);
-      }
-    }
-  }
-
-  function updateGraph(isLive = false) {
-    if (!graphInstance) return;
-
-    if (isLive) {
-      const prevData = graphInstance.graphData();
-      if (prevData && prevData.nodes) {
-        const posMap = new Map();
-        for (const n of prevData.nodes) {
-          if (n.x !== undefined) posMap.set(n.id, { x: n.x, y: n.y, z: n.z });
-        }
-        for (const node of graphDataObj.nodes) {
-          const saved = posMap.get(node.id);
-          if (saved) {
-            node.x = saved.x;
-            node.y = saved.y;
-            node.z = saved.z;
-          }
-        }
-      }
-    }
-
-    graphInstance.graphData(graphDataObj);
-
-    if (!isLive && graphDataObj.nodes.length > 0) {
-      setTimeout(() => graphInstance.zoomToFit(400, 40), 200);
-    }
-  }
-
-  async function loadGraph(isLive = false) {
-    const generation = ++graphGeneration;
-    error = null;
-    try {
-      const data = await graph.get();
-      if (disposed || generation !== graphGeneration) return;
-      if (!data || !Array.isArray(data.nodes)) {
-        throw new Error('Invalid graph data');
-      }
-      const processed = preprocessData(data);
-      graphDataObj = processed;
-      nodeCount = processed.nodes.length;
-      linkCount = processed.links.length;
-      hasData = processed.nodes.length > 0;
-      _selectedId = undefined;
-      _hoverId = undefined;
-      if (graphInstance) {
-        updateGraph(isLive);
-        refreshRender();
-      }
-    } catch (e) {
-      if (disposed || generation !== graphGeneration) return;
-      error = e.message;
-    } finally {
-      if (!disposed && generation === graphGeneration) loading = false;
-    }
+  function retry() {
+    error = "";
+    loading = true;
+    canvas?.retry();
   }
 </script>
 
-<div class="graph-view">
-  <div class="graph-canvas" bind:this={container}></div>
-  {#if loading}
-    <div class="loading">Loading graph...</div>
-  {:else if error}
-    <div class="error">{error}</div>
-  {:else}
-    {#if !hasData}
-      <div class="empty graph-overlay">No notes found. Create some notes with [[WikiLinks]] to see the graph.</div>
-    {/if}
-    <div class="graph-controls">
-      <button onclick={resetView} title="Fit to view" disabled={nodeCount === 0}>
-        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
-      </button>
-      <button
-        class="icon-toggle"
-        class:active={showAllLabels}
-        onclick={toggleAllLabels}
-        title="Toggle always-visible node labels"
-        aria-label="Toggle always-visible node labels"
-        aria-pressed={showAllLabels}
-      >
-        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <circle cx="5" cy="6" r="1.5" fill="currentColor"/>
-          <circle cx="5" cy="12" r="1.5" fill="currentColor"/>
-          <circle cx="5" cy="18" r="1.5" fill="currentColor"/>
-          <path d="M9 6h10"/>
-          <path d="M9 12h10"/>
-          <path d="M9 18h10"/>
-        </svg>
-      </button>
-      <span class="graph-info">{nodeCount} notes · {linkCount} links</span>
-      {#if selectedNodeId}
-        <span class="graph-info emphasis">Click selected note again to open it</span>
-      {/if}
+<div class="graph-page">
+  <div class="graph-heading">
+    <div>
+      <div class="eyebrow">Follow an idea</div>
+      <h1>Your knowledge, connected.</h1>
+      <p>Explore the relationships between your notes.</p>
     </div>
-  {/if}
+    <span class="graph-info"
+      >{nodes.length} note{nodes.length === 1 ? "" : "s"} · {links.length} link{links.length ===
+      1
+        ? ""
+        : "s"}</span
+    >
+  </div>
+  <div class="graph-tools">
+    <div class="graph-search">
+      <Icon name="search" size={17} /><input
+        aria-label="Find a graph note"
+        placeholder="Find a note in the graph…"
+        bind:value={query}
+      /><button
+        class="icon-button"
+        aria-label={showList ? "Hide note list" : "Browse graph notes"}
+        aria-expanded={showList || Boolean(query)}
+        on:click={() => (showList = !showList)}
+        ><Icon name="outline" size={17} /></button
+      >
+      {#if query || showList}<div class="node-results" aria-label="Graph notes">
+          {#each matching.slice(0, 20) as node}<button
+              on:click={() => select(node)}
+              ><Icon name="note" size={15} /><span
+                >{node.title}<small>{node.type}</small></span
+              ><Icon name="chevron" size={13} /></button
+            >{:else}<p>No matching notes.</p>{/each}{#if matching.length > 20}<p
+            >
+              Showing 20 of {matching.length}. Type to narrow your search.
+            </p>{/if}
+        </div>{/if}
+    </div>
+    <div class="graph-buttons">
+      <button
+        class="button"
+        title="Fit to view"
+        disabled={!nodes.length || Boolean(canvasError)}
+        on:click={() => canvas?.fit()}
+        ><Icon name="fit" size={15} />Fit view</button
+      ><button
+        class="button"
+        aria-label="Toggle always-visible node labels"
+        aria-pressed={labels}
+        disabled={Boolean(canvasError)}
+        on:click={() => (labels = canvas?.labels())}
+        ><Icon name="outline" size={15} />Labels</button
+      >
+    </div>
+  </div>
+  <div class="graph-legend" aria-label="Filter graph by note type">
+    <button aria-pressed={type === "all"} on:click={() => changeType("all")}
+      >All types</button
+    >{#each types as item}<button
+        aria-pressed={type === item}
+        on:click={() => changeType(item)}>{item}</button
+      >{/each}
+  </div>
+  <div class="graph-stage">
+    <GraphCanvas
+      bind:this={canvas}
+      on:data={received}
+      on:select={(event) => (selected = event.detail)}
+      on:labels={(event) => (labels = event.detail)}
+      on:loaderror={(event) => {
+        error = event.detail;
+        loading = false;
+      }}
+      on:canvaserror={(event) => {
+        canvasError = event.detail;
+        showList = true;
+      }}
+    />
+    {#if loading}<div class="graph-overlay" aria-busy="true">
+        <Icon name="graph" size={30} />
+        <p>Finding the connections…</p>
+      </div>
+    {:else if error}<div class="graph-overlay">
+        <EmptyState
+          icon="warning"
+          title="The graph could not load"
+          message={error}
+          compact
+          ><button class="button" on:click={retry}>Try again</button
+          ></EmptyState
+        >
+      </div>
+    {:else if !nodes.length}<div class="graph-overlay">
+        <EmptyState
+          icon="graph"
+          title="Ideas are better connected"
+          message="Create a few notes and link them with WikiLinks or Markdown links. Their connections will appear here."
+          compact
+        />
+      </div>
+    {:else if canvasError}<div class="canvas-warning" role="status">
+        {canvasError}
+      </div>{/if}
+    {#if selected}<aside class="node-inspector" aria-label="Selected note">
+        <div class="inspector-heading">
+          <span class="eyebrow">Selected note</span><button
+            class="icon-button"
+            aria-label="Close selected note"
+            on:click={() => {
+              selected = null;
+              canvas?.clearSelection();
+            }}><Icon name="close" size={15} /></button
+          >
+        </div>
+        <span class="tag-chip">{selected.type}</span>
+        <h2>{selected.title}</h2>
+        <p class="node-path">{selected.id}</p>
+        <p class="connection-count">
+          <Icon name="link" size={14} />{connections} connection{connections ===
+          1
+            ? ""
+            : "s"}
+        </p>
+        <button
+          class="button primary"
+          on:click={() => dispatch("navigate", selected.id)}
+          >Open note<Icon name="arrow" size={15} /></button
+        >
+      </aside>{/if}
+    {#if nodes.length && !selected && !error}<div class="graph-hint">
+        Select a node to explore · Drag to rotate · Scroll to zoom
+      </div>{/if}
+  </div>
 </div>
 
 <style>
-  .graph-canvas { position: absolute; inset: 0; }
-  .graph-view {
-    width: 100%;
-    height: 100%;
-    position: relative;
-    overflow: hidden;
-    background: var(--bg);
-  }
-
-  .graph-view :global(canvas) {
-    display: block;
-  }
-
-  .loading,
-  .error,
-  .empty {
+  .graph-page {
     display: flex;
-    align-items: center;
-    justify-content: center;
-    height: 100%;
-    color: var(--color-muted);
-    font-size: 0.875rem;
-    padding: 2rem;
-    text-align: center;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    padding: 28px 32px 20px;
   }
-
-  .error {
-    color: var(--accent-missing);
-  }
-
-  .graph-controls {
-    position: absolute;
-    bottom: 1rem;
-    left: 1rem;
+  .graph-heading {
     display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    z-index: 10;
-    flex-wrap: wrap;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 14px;
+    margin-bottom: 22px;
   }
-
-  .graph-controls button {
-    padding: 0.4rem;
-    border-radius: var(--radius-sm);
-    background: var(--bg-elevated);
-    border: 1px solid var(--border-color);
+  h1 {
+    font-size: 27px;
+    font-weight: 600;
+    letter-spacing: -0.9px;
+    line-height: 1.25;
+    margin: 10px 0;
+  }
+  .graph-heading p {
     color: var(--color-muted);
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    transition: all 0.15s;
-    box-shadow: var(--shadow-sm);
+    font-size: 12px;
+    margin: 0;
   }
-
-  .graph-controls button:hover {
-    background: var(--hover-bg);
-    color: var(--color);
-  }
-
-  .graph-controls button:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  .graph-controls button:disabled:hover {
-    background: var(--bg-elevated);
-    color: var(--color-muted);
-  }
-
-  .graph-controls button.active {
-    background: var(--primary-soft);
-    color: var(--primary);
-    border-color: color-mix(in srgb, var(--primary) 35%, var(--border-color));
-  }
-
-  .graph-controls button.icon-toggle {
-    width: 2rem;
-    height: 2rem;
-    padding: 0;
-    color: var(--color-faint);
-  }
-
-  .graph-controls button.icon-toggle svg {
-    display: block;
-    stroke: currentColor;
-    color: inherit;
-  }
-
-  .graph-controls button.icon-toggle:hover {
-    color: var(--color);
-  }
-
-  .graph-controls button.icon-toggle.active {
-    background: var(--primary-soft);
-    color: var(--primary);
-    border-color: color-mix(in srgb, var(--primary) 35%, var(--border-color));
-  }
-
   .graph-info {
-    font-size: 0.75rem;
-    color: var(--color-faint);
-    user-select: none;
+    color: var(--color-muted);
+    font-size: 11px;
+    white-space: nowrap;
+    margin-bottom: 2px;
   }
-
-  .graph-info.emphasis {
+  .graph-tools {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .graph-search {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    position: relative;
+    max-width: 390px;
+    flex: 1;
+    border: 1px solid var(--border-strong);
+    border-radius: 7px;
+    background: var(--bg-elevated);
+    padding: 2px 5px 2px 12px;
     color: var(--color-muted);
   }
-
+  .graph-search input {
+    border: 0;
+    background: none;
+    min-width: 0;
+    flex: 1;
+    padding: 8px 0;
+    font-size: 12px;
+    outline: 0;
+  }
+  .graph-search:focus-within {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+  }
+  .graph-buttons {
+    display: flex;
+    gap: 6px;
+    margin-left: auto;
+  }
+  .graph-buttons button {
+    font-size: 11px;
+    min-height: 36px;
+    padding: 7px 10px;
+  }
+  .node-results {
+    position: absolute;
+    top: calc(100% + 7px);
+    left: 0;
+    right: 0;
+    z-index: 30;
+    max-height: 330px;
+    overflow-y: auto;
+    padding: 6px;
+    border: 1px solid var(--border-strong);
+    border-radius: 9px;
+    background: var(--bg-elevated);
+    box-shadow: var(--shadow-lg);
+  }
+  .node-results button {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 10px;
+    text-align: left;
+    background: none;
+    border: 0;
+    border-radius: 5px;
+  }
+  .node-results button:hover {
+    background: var(--hover-bg);
+  }
+  .node-results button > span {
+    min-width: 0;
+    flex: 1;
+    font-size: 12px;
+    overflow-wrap: anywhere;
+    color: var(--color);
+  }
+  .node-results small {
+    display: block;
+    font-size: 10px;
+    margin-top: 3px;
+    color: var(--color-muted);
+  }
+  .node-results p {
+    font-size: 11px;
+    color: var(--color-muted);
+    padding: 8px;
+  }
+  .graph-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 14px 0;
+  }
+  .graph-legend button {
+    border: 1px solid transparent;
+    background: none;
+    color: var(--color-muted);
+    border-radius: 5px;
+    font-size: 10px;
+    padding: 5px 8px;
+  }
+  .graph-legend button[aria-pressed="true"] {
+    background: var(--primary-soft);
+    color: var(--active-color);
+    border-color: var(--border-color);
+  }
+  .graph-stage {
+    position: relative;
+    flex: 1;
+    min-height: 160px;
+    overflow: hidden;
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+  }
   .graph-overlay {
     position: absolute;
     inset: 0;
-    z-index: 5;
-    background: color-mix(in srgb, var(--bg) 82%, transparent);
-    pointer-events: none;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg);
+    color: var(--color-muted);
+    text-align: center;
+    font-size: 12px;
+  }
+  .node-inspector {
+    position: absolute;
+    top: 16px;
+    right: 16px;
+    width: 240px;
+    max-width: calc(100% - 32px);
+    border: 1px solid var(--border-strong);
+    background: var(--bg-elevated);
+    box-shadow: var(--shadow-md);
+    padding: 18px;
+    border-radius: 10px;
+    max-height: calc(100% - 32px);
+    overflow-y: auto;
+  }
+  .inspector-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin: -5px -6px 12px 0;
+  }
+  h2 {
+    font-size: 18px;
+    line-height: 1.5;
+    font-weight: 550;
+    letter-spacing: -0.4px;
+    margin: 12px 0 6px;
+    overflow-wrap: anywhere;
+  }
+  .node-path {
+    font-size: 11px;
+    color: var(--color-muted);
+    overflow-wrap: anywhere;
+  }
+  .connection-count {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    font-size: 11px;
+    color: var(--color-muted);
+    margin: 18px 0;
+  }
+  .node-inspector > button {
+    width: 100%;
+  }
+  .graph-hint {
+    position: absolute;
+    bottom: 14px;
+    left: 16px;
+    font-size: 10px;
+    color: var(--color-muted);
+    padding: 5px 8px;
+    border-radius: 4px;
+    background: var(--bg);
+    max-width: calc(100% - 32px);
+  }
+  .canvas-warning {
+    position: absolute;
+    top: 16px;
+    left: 16px;
+    right: 16px;
+    padding: 16px;
+    color: var(--warning);
+    background: var(--warning-bg);
+    border-radius: 8px;
+    font-size: 12px;
+  }
+  @media (max-width: 768px) {
+    .graph-page {
+      padding: 24px 16px 16px;
+    }
+    .graph-heading {
+      flex-wrap: wrap;
+      margin-bottom: 20px;
+    }
+    h1 {
+      font-size: 24px;
+    }
+    .graph-tools {
+      flex-wrap: wrap;
+    }
+    .graph-search {
+      flex-basis: 100%;
+      max-width: none;
+    }
+    .graph-search input {
+      font-size: 16px;
+    }
+    .graph-buttons {
+      margin-left: 0;
+    }
+    .graph-buttons button,
+    .graph-legend button {
+      min-height: 44px;
+    }
+    .graph-legend {
+      margin: 10px 0;
+    }
+    .node-inspector {
+      top: auto;
+      bottom: 12px;
+      left: 12px;
+      right: 12px;
+      width: auto;
+      max-width: none;
+      max-height: calc(100% - 24px);
+      padding: 16px;
+    }
+    .graph-hint {
+      font-size: 10px;
+    }
   }
 </style>

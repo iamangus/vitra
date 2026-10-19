@@ -1,92 +1,91 @@
 <script>
-  import { createEventDispatcher } from 'svelte';
-
-  const dispatch = createEventDispatcher();
-
+  import { createEventDispatcher } from "svelte";
+  import Icon from "./Icon.svelte";
   export let backlinks = [];
+  const dispatch = createEventDispatcher();
 </script>
 
-{#if backlinks.length > 0}
-  <div class="backlinks-section">
-    <div class="backlinks-header">
-      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M9 14 4 9l5-5"/>
-        <path d="M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5v0a5.5 5.5 0 0 1-5.5 5.5H11"/>
-      </svg>
-      <span>Linked from</span>
+<section class="backlinks-section" aria-label="Linked from">
+  <h2>
+    <Icon name="link" size={15} />Linked from<span>{backlinks.length}</span>
+  </h2>
+  {#if backlinks.length}<div class="backlinks-list">
+      {#each backlinks as link}<a
+          href={"/note/" + encodeURIComponent(link.path)}
+          on:click|preventDefault={() => dispatch("navigate", link.path)}
+          ><Icon name="note" size={16} /><span
+            ><strong>{link.title}</strong><small
+              >{link.path.includes("/")
+                ? link.path.slice(0, link.path.lastIndexOf("/"))
+                : "Vault root"}</small
+            ></span
+          ><Icon name="arrow" size={14} /></a
+        >{/each}
     </div>
-    <div class="backlinks-list">
-      {#each backlinks as link}
-        <a
-          href="/note/{link.path}"
-          class="backlink-item"
-          on:click|preventDefault={() => dispatch('navigate', link.path)}
-        >
-          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/>
-            <polyline points="14 2 14 8 20 8"/>
-          </svg>
-          <span class="backlink-title">{link.title}</span>
-        </a>
-      {/each}
-    </div>
-  </div>
-{/if}
+  {:else}<p>
+      No incoming links yet. Reference this note from another page to connect
+      them.
+    </p>{/if}
+</section>
 
 <style>
   .backlinks-section {
-    margin-top: 3rem;
-    padding-top: 1.5rem;
+    margin-top: 52px;
+    padding-top: 24px;
     border-top: 1px solid var(--border-color);
   }
-
-  .backlinks-header {
+  h2 {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    font-size: 12px;
+    font-weight: 550;
+    margin: 0 0 14px;
+  }
+  h2 > span {
+    font-size: 10px;
+    color: var(--color-muted);
+    background: var(--hover-bg);
+    border-radius: 4px;
+    padding: 1px 5px;
+  }
+  .backlinks-list a {
     display: flex;
     align-items: center;
-    gap: 0.5rem;
-    font-size: 0.75rem;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: var(--color-faint);
-    margin-bottom: 0.75rem;
-  }
-
-  .backlinks-header svg {
-    opacity: 0.6;
-  }
-
-  .backlinks-list {
-    display: flex;
-    flex-direction: column;
-    gap: 0.25rem;
-  }
-
-  .backlink-item {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    padding: 0.5rem 0.625rem;
-    border-radius: var(--radius-sm);
-    font-size: 0.875rem;
+    gap: 11px;
+    padding: 10px 4px;
     color: var(--color-muted);
     text-decoration: none;
-    transition: all 0.15s;
+    border-radius: 6px;
   }
-
-  .backlink-item svg {
-    opacity: 0.4;
-    flex-shrink: 0;
-  }
-
-  .backlink-item:hover {
+  .backlinks-list a:hover {
     background: var(--hover-bg);
-    color: var(--color);
   }
-
-  .backlink-title {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+  .backlinks-list a > span {
+    min-width: 0;
+    flex: 1;
+  }
+  strong {
+    display: block;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--color);
+    overflow-wrap: anywhere;
+  }
+  small {
+    display: block;
+    margin-top: 3px;
+    font-size: 10px;
+  }
+  p {
+    font-size: 12px;
+    color: var(--color-muted);
+    line-height: 1.7;
+    margin: 0;
+  }
+  @media (max-width: 768px) {
+    .backlinks-list a {
+      min-height: 52px;
+    }
   }
 </style>

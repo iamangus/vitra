@@ -1,619 +1,800 @@
 <script>
-  import { createEventDispatcher, onMount } from 'svelte';
-  import { files, folders, fileOps } from '../lib/api.js';
-  import { subscribeToLiveUpdates } from '../lib/live.js';
-  import FileTree from './FileTree.svelte';
-  import Activity from './Activity.svelte';
-  import { theme } from '../stores/theme.js';
-  import { focusScope } from '../lib/focus.js';
-  import { flushAffectedDrafts } from '../lib/drafts.js';
+  import { createEventDispatcher, onMount, tick } from "svelte";
+  import { files, folders, notes, fileOps } from "../lib/api.js";
+  import { subscribeToLiveUpdates } from "../lib/live.js";
+  import { flushAffectedDrafts } from "../lib/drafts.js";
+  import { focusScope } from "../lib/focus.js";
+  import { theme } from "../stores/theme.js";
+  import FileTree from "./FileTree.svelte";
+  import Dialog from "./Dialog.svelte";
+  import Icon from "./Icon.svelte";
 
-  const dispatch = createEventDispatcher();
-
-  export let activePath = '';
+  export let activePath = "";
+  export let view = "home";
   export let sidebarOpen = true;
   export let mobile = false;
-
+  const dispatch = createEventDispatcher();
   let treeData = [];
-  let showNewFolderDialog = false;
-  let newFolderName = '';
-  let contextMenu = { show: false, x: 0, y: 0, path: '', isDir: false };
-  let sidebarWidth = 280;
-  let isResizing = false;
-  let liveTreeReloadTimeout;
-  let activeTab = 'files';
+  let loading = true;
+  let treeError = "";
+  let expanded = new Set();
+  let appearance = "system";
+  let menu = null;
+  let action = null;
+  let fieldValue = "";
+  let destination = "";
+  let busy = false;
+  let error = "";
+  let reloadTimer;
+  let requestId = 0;
+  let dragging = false;
   let dragOverRoot = false;
+  let sidebarElement;
+  const navigation = [
+    { id: "home", name: "Notes", icon: "note" },
+    { id: "search", name: "Search", icon: "search" },
+    { id: "graph", name: "Graph", icon: "graph" },
+    { id: "activity", name: "Activity", icon: "activity" },
+  ];
+  try {
+    appearance = localStorage.getItem("theme") || "system";
+  } catch {}
+
+  $: folderOptions = flatten(treeData).filter(
+    (node) =>
+      node.IsDir &&
+      (!action?.isDir ||
+        (node.Path !== action.path &&
+          !node.Path.startsWith(action.path + "/"))),
+  );
+  $: actionTitle =
+    action?.kind === "delete"
+      ? `Delete ${action.isDir ? "folder" : "note"}?`
+      : {
+          note: "Create a note",
+          folder: "Create a folder",
+          rename: "Rename " + (action?.isDir ? "folder" : "note"),
+          move: "Move " + (action?.isDir ? "folder" : "note"),
+        }[action?.kind] || "";
+  $: if (mobile && sidebarOpen && sidebarElement) trapDrawer(sidebarElement);
+  $: expandActive(activePath);
+
+  function expandActive(path) {
+    const parts = path.split("/");
+    expanded = new Set([
+      ...expanded,
+      ...parts
+        .slice(0, -1)
+        .map((_, index) => parts.slice(0, index + 1).join("/")),
+    ]);
+  }
+
+  function flatten(nodes) {
+    return nodes.flatMap((node) => [
+      node,
+      ...(node.Children ? flatten(node.Children) : []),
+    ]);
+  }
+  function parent(path) {
+    return path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
+  }
+  function entryPath(path, isDir) {
+    return isDir ? path : path + ".md";
+  }
+  function join(folder, name) {
+    return folder ? folder + "/" + name : name;
+  }
 
   async function loadTree() {
+    const id = ++requestId;
     try {
-      treeData = await files.list(activePath);
-    } catch (e) {
-      console.error('Failed to load file tree:', e);
+      const result = await files.list(activePath);
+      if (id !== requestId) return;
+      treeData = result || [];
+      treeError = "";
+      dispatch(
+        "tree",
+        flatten(treeData)
+          .filter((node) => !node.IsDir)
+          .map((node) => ({ path: node.Path, title: node.Name })),
+      );
+    } catch {
+      if (id === requestId) treeError = "Your notes could not load.";
+    } finally {
+      if (id === requestId) loading = false;
     }
   }
 
-  function scheduleTreeReload() {
-    clearTimeout(liveTreeReloadTimeout);
-    liveTreeReloadTimeout = setTimeout(() => {
-      loadTree();
-    }, 250);
+  export async function revealFolder(path) {
+    const next = new Set(expanded);
+    const parts = path.split("/");
+    for (let index = 1; index <= parts.length; index++)
+      next.add(parts.slice(0, index).join("/"));
+    expanded = next;
+    await tick();
+    const target = sidebarElement?.querySelector(
+      `summary[data-path="${CSS.escape(path)}"]`,
+    );
+    target?.scrollIntoView({ block: "nearest" });
+    target?.focus();
   }
 
-  function startResize(e) {
-    isResizing = true;
-    document.body.style.cursor = 'col-resize';
-    document.body.style.userSelect = 'none';
-    window.addEventListener('mousemove', handleResize);
-    window.addEventListener('mouseup', stopResize);
+  export function openCreate(kind = "note", folder = parent(activePath)) {
+    menu = null;
+    action = { kind, path: "", isDir: kind === "folder" };
+    fieldValue = "";
+    destination = folder;
+    error = "";
   }
 
-  function handleResize(e) {
-    if (!isResizing) return;
-    const newWidth = e.clientX;
-    if (newWidth >= 200 && newWidth <= 420) {
-      sidebarWidth = newWidth;
-    }
+  function openAction(kind) {
+    const selected = menu;
+    menu = null;
+    action = { kind, path: selected.path, isDir: selected.isDir };
+    fieldValue = selected.path.split("/").pop();
+    destination = parent(selected.path);
+    error = "";
   }
 
-  function stopResize() {
-    isResizing = false;
-    document.body.style.cursor = '';
-    document.body.style.userSelect = '';
-    window.removeEventListener('mousemove', handleResize);
-    window.removeEventListener('mouseup', stopResize);
-  }
-
-  function handleNewNote() {
-    const name = prompt('New note name:');
-    if (name) dispatch('navigate', name);
-  }
-
-  async function handleCreateFolder() {
-    if (!newFolderName) return;
-    try {
-      await folders.create(newFolderName);
-      newFolderName = '';
-      showNewFolderDialog = false;
-      await loadTree();
-    } catch (e) {
-      alert('Failed to create folder: ' + e.message);
-    }
-  }
-
-  function handleContextMenu(e) {
-    e.preventDefault();
-    const item = e.target.closest('[data-path]');
-    if (!item) return;
-    contextMenu = {
-      show: true,
-      x: e.clientX,
-      y: e.clientY,
-      path: item.dataset.path,
-      isDir: item.dataset.isdir === 'true'
+  function showActions(event) {
+    const { path, isDir, anchor } = event.detail;
+    const rect = anchor.getBoundingClientRect();
+    menu = {
+      path,
+      isDir,
+      x: Math.min(rect.right, Math.max(12, window.innerWidth - 208)),
+      y: Math.min(rect.bottom + 5, Math.max(12, window.innerHeight - 286)),
     };
   }
 
-  function closeContextMenu() {
-    contextMenu.show = false;
-  }
-
-  async function ctxRename() {
-    if (!contextMenu.path) return;
-    const newName = prompt('Rename to:', contextMenu.path);
-    if (newName && newName !== contextMenu.path) {
-      try {
-        await flushAffectedDrafts(contextMenu.path);
-        await fileOps.rename(entryPath(contextMenu.path, contextMenu.isDir), entryPath(newName, contextMenu.isDir));
-        navigateAfterRename(contextMenu.path, newName, contextMenu.isDir);
-        await loadTree();
-      } catch (e) {
-        alert('Failed to rename: ' + e.message);
-      }
-    }
-    closeContextMenu();
-  }
-
-  async function ctxDelete() {
-    if (!contextMenu.path) return;
-    if (!confirm('Delete "' + contextMenu.path + '"?')) return;
-    try {
-      await flushAffectedDrafts(contextMenu.path);
-      await fileOps.delete(entryPath(contextMenu.path, contextMenu.isDir));
-      if (activePath === contextMenu.path || activePath.startsWith(contextMenu.path + '/')) dispatch('home');
-      await loadTree();
-    } catch (e) {
-      alert('Failed to delete: ' + e.message);
-    }
-    closeContextMenu();
-  }
-
-  async function ctxNewNote() {
-    if (!contextMenu.path) return;
-    const folder = contextMenu.isDir ? contextMenu.path : '';
-    const name = prompt('New note name:');
-    if (name) {
-      const fullPath = folder ? folder + '/' + name : name;
-      dispatch('navigate', fullPath);
-    }
-    closeContextMenu();
-  }
-
-  function ctxDownload() {
-    if (!contextMenu.path) return;
-    files.download(entryPath(contextMenu.path, contextMenu.isDir));
-    closeContextMenu();
-  }
-
-  async function doMove(oldPath, newPath) {
-    try {
-      await flushAffectedDrafts(oldPath);
-      const isDir = findNode(treeData, oldPath)?.IsDir ?? false;
-      await fileOps.rename(entryPath(oldPath, isDir), entryPath(newPath, isDir));
-      navigateAfterRename(oldPath, newPath, true);
-      await loadTree();
-    } catch (e) {
-      alert('Failed to move: ' + e.message);
-    }
+  function contextMenu(event) {
+    const target = event.target.closest("[data-path]");
+    if (!target) return;
+    event.preventDefault();
+    menu = {
+      path: target.dataset.path,
+      isDir: target.dataset.isdir === "true",
+      x: Math.max(12, Math.min(event.clientX, window.innerWidth - 208)),
+      y: Math.max(12, Math.min(event.clientY, window.innerHeight - 286)),
+    };
   }
 
   function navigateAfterRename(oldPath, newPath, isDir) {
-    if (activePath === oldPath) dispatch('navigate', newPath);
-    else if (activePath.startsWith(oldPath + '/')) dispatch('navigate', newPath + activePath.slice(oldPath.length));
+    if (!isDir && activePath === oldPath) dispatch("navigate", newPath);
+    else if (isDir && activePath.startsWith(oldPath + "/"))
+      dispatch("navigate", newPath + activePath.slice(oldPath.length));
   }
 
-  function entryPath(path, isDir) { return isDir ? path : path + '.md'; }
+  async function move(oldPath, newPath, isDir) {
+    await flushAffectedDrafts(oldPath);
+    await fileOps.rename(entryPath(oldPath, isDir), entryPath(newPath, isDir));
+    navigateAfterRename(oldPath, newPath, isDir);
+    if (parent(newPath)) {
+      const next = new Set(expanded);
+      next.add(parent(newPath));
+      expanded = next;
+    }
+    await loadTree();
+  }
 
-  function findNode(nodes, path) {
-    for (const node of nodes) {
-      if (node.Path === path) return node;
-      const child = node.Children && findNode(node.Children, path);
-      if (child) return child;
+  async function submit() {
+    if (busy) return;
+    error = "";
+    const name = fieldValue.trim();
+    if (
+      ["note", "folder", "rename"].includes(action.kind) &&
+      (!name || name === "." || name === ".." || /[\\/\x00]/.test(name))
+    ) {
+      error = "Enter a name without slashes. Choose the folder separately.";
+      return;
+    }
+    busy = true;
+    try {
+      if (action.kind === "note" || action.kind === "folder") {
+        const path = join(destination, name);
+        if (action.kind === "note") {
+          await notes.create(path);
+          dispatch("created", path);
+        } else {
+          await folders.create(path);
+          expanded = new Set([...expanded, path]);
+        }
+      } else if (action.kind === "delete") {
+        await flushAffectedDrafts(action.path);
+        await fileOps.delete(entryPath(action.path, action.isDir));
+        if (
+          (!action.isDir && activePath === action.path) ||
+          (action.isDir && activePath.startsWith(action.path + "/"))
+        )
+          dispatch("view", "home");
+      } else {
+        const newPath =
+          action.kind === "move"
+            ? join(destination, action.path.split("/").pop())
+            : join(parent(action.path), name);
+        if (newPath !== action.path)
+          await move(action.path, newPath, action.isDir);
+      }
+      action = null;
+      await loadTree();
+    } catch (cause) {
+      error =
+        cause.status === 409
+          ? "That destination already exists. Choose a different name or folder."
+          : cause.message ||
+            "The action could not finish. Your notes have not been discarded.";
+    } finally {
+      busy = false;
     }
   }
 
-  function handleMoveEvent(e) {
-    const { oldPath, newPath } = e.detail;
-    doMove(oldPath, newPath);
+  async function handleMove(event) {
+    const { oldPath, newPath, isDir } = event.detail;
+    try {
+      await move(oldPath, newPath, isDir);
+    } catch (cause) {
+      action = { kind: "move", path: oldPath, isDir };
+      destination = parent(newPath);
+      error = cause.message;
+    }
   }
 
-  function handleRootDragOver(e) {
-    if (!e.dataTransfer.types.includes('text/plain')) return;
-    e.preventDefault();
-    e.dataTransfer.dropEffect = 'move';
-    dragOverRoot = true;
-  }
-
-  function handleRootDragLeave(e) {
-    if (e.currentTarget.contains(e.relatedTarget)) return;
+  async function rootDrop(event) {
+    event.preventDefault();
     dragOverRoot = false;
+    dragging = false;
+    const source = event.dataTransfer.getData("text/plain");
+    const isDir =
+      event.dataTransfer.getData("application/x-vitra-directory") === "true";
+    const node = flatten(treeData).find(
+      (node) => node.Path === source && node.IsDir === isDir,
+    );
+    if (node && parent(source))
+      await handleMove({
+        detail: {
+          oldPath: source,
+          newPath: source.split("/").pop(),
+          isDir: node.IsDir,
+        },
+      });
   }
 
-  function handleRootDrop(e) {
-    e.preventDefault();
-    dragOverRoot = false;
-    const sourcePath = e.dataTransfer.getData('text/plain');
-    if (!sourcePath) return;
-
-    const sourceName = sourcePath.split('/').pop();
-    if (sourcePath === sourceName) return;
-
-    doMove(sourcePath, sourceName);
+  function menuKeyboard(event) {
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const items = [
+      ...event.currentTarget.querySelectorAll('[role="menuitem"]'),
+    ];
+    const index = items.indexOf(document.activeElement);
+    items[
+      event.key === "Home"
+        ? 0
+        : event.key === "End"
+          ? items.length - 1
+          : (index + (event.key === "ArrowDown" ? 1 : -1) + items.length) %
+            items.length
+    ]?.focus();
   }
 
-  $: isCollapsed = !sidebarOpen;
+  let drawerCleanup;
+  function trapDrawer(node) {
+    if (drawerCleanup) return;
+    const close = (event) => {
+      if (event.key === "Escape" && !action && !menu) dispatch("toggle");
+    };
+    const trap = focusScope(node);
+    node.addEventListener("keydown", close);
+    drawerCleanup = () => {
+      trap.destroy();
+      node.removeEventListener("keydown", close);
+      drawerCleanup = null;
+    };
+  }
+  $: if ((!mobile || !sidebarOpen) && drawerCleanup) drawerCleanup();
 
   onMount(() => {
     loadTree();
-
     const unsubscribe = subscribeToLiveUpdates((event) => {
       if (event.tree || event.notes) {
-        scheduleTreeReload();
+        clearTimeout(reloadTimer);
+        reloadTimer = setTimeout(loadTree, 250);
       }
     });
-
     return () => {
-      clearTimeout(liveTreeReloadTimeout);
+      requestId++;
+      clearTimeout(reloadTimer);
       unsubscribe();
-      stopResize();
+      drawerCleanup?.();
     };
   });
 </script>
 
-<svelte:window on:keydown={event => { if (event.key === 'Escape') { showNewFolderDialog = false; closeContextMenu(); } }} />
+<svelte:window
+  on:keydown={(event) => {
+    if (event.key === "Escape") menu = null;
+  }}
+/>
 
-<!-- Floating toggle button when sidebar is collapsed (desktop only) -->
-{#if isCollapsed && !mobile}
-  <button on:click={() => dispatch('toggle')} class="sidebar-fab" title="Open sidebar">
-    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-      <line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/>
-    </svg>
-  </button>
-{/if}
-
-<aside class="sidebar" class:collapsed={isCollapsed} class:mobile style="width: {mobile ? '280px' : (isCollapsed ? 0 : sidebarWidth) + 'px'}; min-width: {mobile ? '280px' : (isCollapsed ? 0 : sidebarWidth) + 'px'};">
-  <!-- Header -->
-  <div class="sidebar-header">
-    <div class="header-left">
-      <button on:click={() => dispatch('toggle')} class="icon-btn" title={isCollapsed ? 'Open sidebar' : 'Close sidebar'}>
-        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/>
-        </svg>
-      </button>
-      <span class="logo">Vitra</span>
-    </div>
-    <div class="header-right">
-      <button on:click={() => theme.toggle()} class="icon-btn" title="Toggle theme">
-        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>
-        </svg>
-      </button>
-      <button on:click={() => dispatch('graph')} class="icon-btn" title="Graph view">
-        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/>
-          <line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/>
-        </svg>
-      </button>
-      <button on:click={() => dispatch('search')} class="icon-btn" title="Search">
-        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>
-        </svg>
-      </button>
-    </div>
+<aside
+  id="vault-navigation"
+  class="sidebar"
+  class:collapsed={!sidebarOpen}
+  class:mobile
+  aria-label="Vault navigation"
+  inert={!sidebarOpen}
+  bind:this={sidebarElement}
+>
+  <div class="brand-row">
+    <button
+      class="brand"
+      aria-label="Vitra home"
+      on:click={() => dispatch("view", "home")}
+      ><svg
+        width="25"
+        height="27"
+        viewBox="0 0 25 27"
+        fill="none"
+        aria-hidden="true"
+        ><path
+          d="M3 4l9.5 19L22 4 M7 4l5.5 11L18 4"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        /></svg
+      ><span>Vitra</span></button
+    >{#if mobile}<button
+        class="icon-button"
+        aria-label="Close navigation"
+        on:click={() => dispatch("toggle")}><Icon name="close" /></button
+      >{/if}
   </div>
-
-  <!-- Actions -->
-  <div class="sidebar-actions">
-    <button on:click={handleNewNote} class="btn-primary">
-      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><line x1="9" y1="15" x2="15" y2="15"/>
-      </svg>
-      New Note
-    </button>
-    <button on:click={() => showNewFolderDialog = true} class="btn-secondary" title="New Folder">
-      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/><line x1="12" y1="10" x2="12" y2="16"/><line x1="9" y1="13" x2="15" y2="13"/>
-      </svg>
-    </button>
-  </div>
-
-  <!-- Tab strip -->
-  <div class="sidebar-tabs">
-    <button class="tab-btn" class:active={activeTab === 'files'} on:click={() => activeTab = 'files'}>Files</button>
-    <button class="tab-btn" class:active={activeTab === 'activity'} on:click={() => activeTab = 'activity'}>Activity</button>
-  </div>
-
-  <!-- File Tree -->
-  {#if activeTab === 'files'}
-    <div
-      class="file-tree"
-      class:drag-over-root={dragOverRoot}
-      role="navigation"
-      aria-label="Notes"
-      on:contextmenu={handleContextMenu}
-      on:dragover={handleRootDragOver}
-      on:dragleave={handleRootDragLeave}
-      on:drop={handleRootDrop}
+  <div class="vault-label">Local knowledge vault</div>
+  <button class="search-launcher" on:click={() => dispatch("view", "search")}
+    ><Icon name="search" size={16} /><span>Find a note</span><kbd
+      >⌘ / Ctrl K</kbd
+    ></button
+  >
+  <button
+    class="button primary create-button"
+    on:click={() => openCreate("note")}
+    ><Icon name="plus" size={17} />New note</button
+  >
+  <nav class="primary-navigation" aria-label="Workspace">
+    {#each navigation as item}<button
+        class:active={view === item.id ||
+          (view === "note" && item.id === "home")}
+        aria-current={view === item.id ||
+        (view === "note" && item.id === "home")
+          ? "page"
+          : undefined}
+        on:click={() => dispatch("view", item.id)}
+        ><Icon name={item.icon} size={17} />{item.name}</button
+      >{/each}
+  </nav>
+  <div class="tree-heading">
+    <span class="eyebrow">Vault</span><button
+      class="icon-button"
+      aria-label="New folder"
+      title="New folder"
+      on:click={() => openCreate("folder", "")}
+      ><Icon name="plus" size={15} /></button
     >
-      <FileTree nodes={treeData} {activePath} on:navigate on:move={handleMoveEvent} />
-    </div>
-  {:else}
-    <Activity />
-  {/if}
-
-  <!-- Resize Handle (desktop only) -->
-  {#if !mobile}
-    <button type="button" class="resize-handle" role="slider" aria-label="Resize sidebar" aria-orientation="horizontal" aria-valuenow={sidebarWidth} aria-valuemin="200" aria-valuemax="420" on:keydown={event => { if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); sidebarWidth = Math.max(200, Math.min(420, sidebarWidth + (event.key === 'ArrowRight' ? 10 : -10))); } }} on:mousedown={startResize}></button>
-  {/if}
+  </div>
+  <div
+    class="file-tree"
+    on:contextmenu={contextMenu}
+    role="navigation"
+    aria-label="Notes"
+  >
+    {#if loading}<div
+        class="tree-skeleton"
+        aria-label="Loading notes"
+        aria-busy="true"
+      >
+        {#each [75, 90, 60, 80] as width}<div
+            class="skeleton"
+            style={"width:" + width + "%"}
+          ></div>{/each}
+      </div>
+    {:else if treeError}<p class="tree-error" role="alert">{treeError}</p>
+      <button class="button" on:click={loadTree}>Try again</button>
+    {:else if !treeData.length}<p class="tree-empty">
+        A place for your first note.<br />Create one to get started.
+      </p>
+    {:else}<FileTree
+        nodes={treeData}
+        {activePath}
+        bind:expanded
+        on:navigate
+        on:actions={showActions}
+        on:move={handleMove}
+        on:dragstate={(event) => (dragging = event.detail)}
+      />{/if}
+    {#if dragging}<div
+        class="root-drop"
+        class:over={dragOverRoot}
+        role="presentation"
+        on:dragover={(event) => {
+          event.preventDefault();
+          dragOverRoot = true;
+        }}
+        on:dragleave={() => (dragOverRoot = false)}
+        on:drop={rootDrop}
+      >
+        Drop to move to vault root
+      </div>{/if}
+  </div>
+  <div class="sidebar-footer">
+    <Icon name="sun" size={16} /><label for="appearance">Appearance</label
+    ><select
+      id="appearance"
+      aria-label="Appearance"
+      bind:value={appearance}
+      on:change={() => theme.set(appearance)}
+      ><option value="system">System</option><option value="light">Light</option
+      ><option value="dark">Dark</option></select
+    >
+  </div>
 </aside>
 
-<!-- Context Menu -->
-{#if contextMenu.show}
-  <div id="context-menu" role="dialog" aria-label="File actions" tabindex="-1" use:focusScope style="left: {Math.min(contextMenu.x, Math.max(0, window.innerWidth - 180))}px; top: {Math.min(contextMenu.y, Math.max(0, window.innerHeight - 200))}px;">
-    <button on:click={ctxDownload}>Download</button>
-    <button on:click={ctxNewNote}>New Note</button>
-    <button on:click={ctxRename}>Rename</button>
-    <button on:click={ctxDelete} class="danger">Delete</button>
+{#if menu}
+  <button
+    class="menu-dismiss"
+    aria-label="Close file actions"
+    on:click={() => (menu = null)}
+  ></button>
+  <div
+    class="file-menu"
+    role="menu"
+    aria-label="File actions"
+    tabindex="-1"
+    use:focusScope
+    style={"left:" + menu.x + "px;top:" + menu.y + "px"}
+    on:keydown={menuKeyboard}
+  >
+    <div class="menu-label">{menu.path.split("/").pop()}</div>
+    {#if menu.isDir}<button
+        role="menuitem"
+        on:click={() => openCreate("note", menu.path)}
+        ><Icon name="plus" size={16} />New note here</button
+      >{/if}
+    <button role="menuitem" on:click={() => openAction("rename")}
+      ><Icon name="edit" size={16} />Rename</button
+    >
+    <button role="menuitem" on:click={() => openAction("move")}
+      ><Icon name="move" size={16} />Move to…</button
+    >
+    <button
+      role="menuitem"
+      on:click={() => {
+        files.download(entryPath(menu.path, menu.isDir));
+        menu = null;
+      }}><Icon name="download" size={16} />Download</button
+    >
+    <div class="menu-separator"></div>
+    <button
+      role="menuitem"
+      class="delete-action"
+      on:click={() => openAction("delete")}
+      ><Icon name="trash" size={16} />Delete</button
+    >
   </div>
-  <button class="backdrop" aria-label="Close file actions" on:click={closeContextMenu}></button>
 {/if}
 
-<!-- New Folder Dialog -->
-{#if showNewFolderDialog}
-  <div class="dialog-overlay" role="presentation">
-    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="new-folder-title" tabindex="-1" use:focusScope>
-      <h3 id="new-folder-title" class="dialog-title">New Folder</h3>
-      <input type="text" aria-label="Folder path" bind:value={newFolderName} placeholder="folder/name" class="dialog-input" on:keydown={e => e.key === 'Enter' && handleCreateFolder()}>
-      <div class="dialog-actions">
-        <button on:click={() => showNewFolderDialog = false} class="btn-text">Cancel</button>
-        <button on:click={handleCreateFolder} class="btn-primary">Create</button>
-      </div>
-    </div>
-  </div>
+{#if action}
+  <Dialog
+    title={actionTitle}
+    description={action.kind === "delete"
+      ? action.isDir
+        ? "This permanently deletes the folder and everything inside it. This cannot be undone."
+        : "This permanently deletes the note. This cannot be undone."
+      : "Keep your knowledge organized, one note at a time."}
+    {busy}
+    on:cancel={() => (action = null)}
+  >
+    <form id="file-action-form" on:submit|preventDefault={submit}>
+      {#if action.kind === "delete"}<div class="delete-name">
+          <Icon name={action.isDir ? "folder" : "note"} /><strong
+            >{action.path}</strong
+          >
+        </div>
+      {:else}
+        {#if action.kind !== "move"}<label class="field-label" for="entry-name"
+            >Name</label
+          ><input
+            class="field"
+            id="entry-name"
+            bind:value={fieldValue}
+            disabled={busy}
+            required
+            autocomplete="off"
+            placeholder={action.isDir ? "Folder name" : "Untitled note"}
+          />{/if}
+        {#if action.kind === "note" || action.kind === "folder" || action.kind === "move"}<label
+            class="field-label"
+            for="entry-folder"
+            >{action.kind === "move" ? "Destination folder" : "Location"}</label
+          ><select
+            class="field"
+            id="entry-folder"
+            bind:value={destination}
+            disabled={busy}
+            ><option value="">Vault root</option
+            >{#each folderOptions as folder}<option value={folder.Path}
+                >{folder.Path}</option
+              >{/each}</select
+          >{:else}<p class="field-hint">
+            Location: {parent(action.path) || "Vault root"}
+          </p>{/if}
+        {#if action.kind === "move"}<p class="field-hint">
+            Moving: {action.path}
+          </p>{/if}
+      {/if}
+      {#if error}<p class="inline-error" role="alert">{error}</p>{/if}
+    </form>
+    <svelte:fragment slot="actions"
+      ><button
+        class="button quiet"
+        disabled={busy}
+        on:click={() => (action = null)}>Cancel</button
+      ><button
+        class="button"
+        class:primary={action.kind !== "delete"}
+        class:danger={action.kind === "delete"}
+        type="submit"
+        form="file-action-form"
+        disabled={busy}
+        >{busy
+          ? "Working…"
+          : action.kind === "delete"
+            ? "Delete permanently"
+            : action.kind === "move"
+              ? "Move"
+              : action.kind === "rename"
+                ? "Rename"
+                : "Create"}</button
+      ></svelte:fragment
+    >
+  </Dialog>
 {/if}
 
 <style>
   .sidebar {
+    width: 256px;
+    min-width: 256px;
     display: flex;
     flex-direction: column;
+    padding: 25px 16px 12px;
     background: var(--sidebar-bg);
     border-right: 1px solid var(--border-color);
-    transition: width 0.25s ease, min-width 0.25s ease;
+    height: 100dvh;
     overflow: hidden;
-    position: relative;
-    z-index: 100;
-    height: 100vh;
   }
-
   .sidebar.collapsed {
-    width: 0 !important;
-    min-width: 0 !important;
-    border-right: none;
+    display: none;
   }
-
-  .sidebar.mobile {
-    position: fixed;
-    left: 0;
-    top: 0;
-    bottom: 0;
-    z-index: 100;
-    box-shadow: var(--shadow-lg);
-    transform: translateX(-100%);
-    transition: transform 0.25s ease;
-  }
-
-  .sidebar.mobile:not(.collapsed) {
-    transform: translateX(0);
-  }
-
-  .sidebar-header {
+  .brand-row {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 0 0.75rem;
-    height: var(--header-h);
-    border-bottom: 1px solid var(--border-color);
-    flex-shrink: 0;
+    padding: 0 10px;
   }
-
-  .header-left {
+  .brand {
     display: flex;
     align-items: center;
-    gap: 0.5rem;
-  }
-
-  .header-right {
-    display: flex;
-    align-items: center;
-    gap: 0.25rem;
-  }
-
-  .logo {
-    font-weight: 700;
-    font-size: 1rem;
-    letter-spacing: -0.02em;
-    color: var(--color);
-  }
-
-  .icon-btn {
-    padding: 0.4rem;
-    border-radius: var(--radius-sm);
+    gap: 9px;
+    border: 0;
     background: none;
-    border: none;
+    padding: 0;
+    color: var(--color);
+    font-size: 20px;
+    font-weight: 650;
+    letter-spacing: -0.8px;
+  }
+  .brand svg {
+    color: var(--primary);
+  }
+  .vault-label {
     color: var(--color-muted);
-    cursor: pointer;
+    font-size: 11px;
+    padding: 6px 10px 22px;
+  }
+  .search-launcher {
     display: flex;
     align-items: center;
-    justify-content: center;
-    transition: all 0.15s;
+    gap: 9px;
+    padding: 10px;
+    font-size: 12px;
+    border: 1px solid var(--border-strong);
+    color: var(--color-muted);
+    background: var(--bg-elevated);
+    min-height: 38px;
   }
-
-  .icon-btn:hover {
+  kbd {
+    margin-left: auto;
+    font: inherit;
+    font-size: 9px;
+    white-space: nowrap;
+  }
+  .create-button {
+    margin-top: 10px;
+    min-height: 38px;
+  }
+  .primary-navigation {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    margin: 24px 0 20px;
+  }
+  .primary-navigation button {
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    min-height: 35px;
+    text-align: left;
+    border: 0;
+    padding: 8px 11px;
+    background: transparent;
+    font-size: 12px;
+    color: var(--color-muted);
+  }
+  .primary-navigation button:hover {
     background: var(--hover-bg);
     color: var(--color);
   }
-
-  .sidebar-actions {
-    display: flex;
-    gap: 0.5rem;
-    padding: 0.75rem;
-    border-bottom: 1px solid var(--border-color);
-    flex-shrink: 0;
+  .primary-navigation button.active {
+    background: var(--active-bg);
+    color: var(--active-color);
+    font-weight: 550;
   }
-
-  .btn-primary {
+  .tree-heading {
     display: flex;
     align-items: center;
-    justify-content: center;
-    gap: 0.375rem;
-    padding: 0.5rem 0.75rem;
-    border-radius: var(--radius-sm);
-    font-size: 0.8125rem;
-    font-weight: 600;
-    background: var(--primary);
-    color: var(--primary-color);
-    border: none;
-    cursor: pointer;
-    flex: 1;
-    transition: background 0.15s;
+    justify-content: space-between;
+    padding-left: 10px;
   }
-
-  .btn-primary:hover {
-    background: var(--primary-hover);
-  }
-
-  .btn-secondary {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 0.5rem;
-    border-radius: var(--radius-sm);
-    font-size: 0.8125rem;
-    font-weight: 500;
-    background: var(--button-bg);
-    color: var(--button-color);
-    border: none;
-    cursor: pointer;
-    transition: background 0.15s;
-  }
-
-  .btn-secondary:hover {
-    background: var(--hover-bg);
-  }
-
-  .btn-text {
-    padding: 0.5rem 0.75rem;
-    border-radius: var(--radius-sm);
-    font-size: 0.875rem;
-    background: none;
-    border: none;
-    color: var(--color-muted);
-    cursor: pointer;
-    transition: all 0.15s;
-  }
-
-  .btn-text:hover {
-    background: var(--hover-bg);
-    color: var(--color);
-  }
-
   .file-tree {
     flex: 1;
+    min-height: 0;
     overflow-y: auto;
-    padding: 0.5rem;
+    margin: 2px -4px 12px;
+    padding: 0 4px;
   }
-
-  .file-tree.drag-over-root {
-    outline: 2px dashed var(--primary);
-    outline-offset: -2px;
-  }
-
-  .sidebar-tabs {
-    display: flex;
-    border-bottom: 1px solid var(--border-color);
-    flex-shrink: 0;
-  }
-
-  .tab-btn {
-    flex: 1;
-    padding: 0.5rem 0.75rem;
-    font-size: 0.75rem;
-    font-weight: 500;
-    background: none;
-    border: none;
-    border-bottom: 2px solid transparent;
+  .tree-empty {
     color: var(--color-muted);
-    cursor: pointer;
-    transition: all 0.15s;
+    font-size: 12px;
+    line-height: 1.8;
+    padding: 6px 10px;
   }
-
-  .tab-btn:hover {
-    color: var(--color);
-    background: var(--hover-bg);
+  .tree-skeleton {
+    display: grid;
+    gap: 17px;
+    padding: 12px 10px;
   }
-
-  .tab-btn.active {
-    color: var(--primary);
-    border-bottom-color: var(--primary);
+  .tree-skeleton div {
+    height: 13px;
   }
-
-  .resize-handle {
-    border: 0;
-    padding: 0;
-    position: absolute;
-    right: -3px;
-    top: 0;
-    bottom: 0;
-    width: 6px;
-    cursor: col-resize;
-    background: transparent;
-    z-index: 10;
-    transition: background 0.15s;
+  .tree-error {
+    color: var(--danger);
+    font-size: 12px;
+    padding: 4px 10px;
   }
-
-  .resize-handle:hover {
-    background: var(--primary);
-  }
-
-  .sidebar-fab {
-    position: fixed;
-    top: 0.625rem;
-    left: 0.625rem;
-    z-index: 95;
-    padding: 0.5rem;
-    border-radius: var(--radius-sm);
-    background: var(--bg-elevated);
-    border: 1px solid var(--border-color);
-    color: var(--color-muted);
-    cursor: pointer;
+  .sidebar-footer {
     display: flex;
     align-items: center;
-    justify-content: center;
-    box-shadow: var(--shadow-md);
-    transition: all 0.15s;
+    gap: 8px;
+    border-top: 1px solid var(--border-color);
+    padding: 13px 7px 0;
+    color: var(--color-muted);
+    font-size: 11px;
   }
-
-  .sidebar-fab:hover {
-    background: var(--hover-bg);
+  .sidebar-footer select {
+    width: 80px;
+    margin-left: auto;
+    padding: 5px 0 5px 4px;
     color: var(--color);
-  }
-
-  .backdrop {
     background: transparent;
     border: 0;
-    padding: 0;
+    font-size: 11px;
+  }
+  .menu-dismiss {
     position: fixed;
     inset: 0;
-    z-index: 50;
+    border: 0;
+    background: transparent;
+    z-index: 400;
   }
-
-  .dialog-overlay {
+  .file-menu {
     position: fixed;
-    inset: 0;
-    background: var(--overlay-bg);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 200;
-    backdrop-filter: blur(2px);
-  }
-
-  .dialog {
+    width: 196px;
+    z-index: 410;
     background: var(--bg-elevated);
-    color: var(--color);
-    border-radius: var(--radius);
-    padding: 1.5rem;
-    width: 22rem;
-    max-width: 90vw;
+    border: 1px solid var(--border-strong);
+    border-radius: 10px;
     box-shadow: var(--shadow-lg);
-    border: 1px solid var(--border-color);
+    padding: 6px;
   }
-
-  .dialog-title {
-    font-weight: 600;
-    margin: 0 0 1rem;
-    font-size: 1rem;
-  }
-
-  .dialog-input {
-    width: 100%;
-    padding: 0.5rem 0.75rem;
-    border-radius: var(--radius-sm);
-    border: 1px solid var(--border-color);
-    font-size: 0.875rem;
-    margin-bottom: 1rem;
-    background: var(--bg);
-    color: var(--color);
-    outline: none;
-    transition: border-color 0.15s;
-  }
-
-  .dialog-input:focus {
-    border-color: var(--primary);
-  }
-
-  .dialog-actions {
+  .file-menu button {
     display: flex;
-    justify-content: flex-end;
-    gap: 0.5rem;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 8px 10px;
+    min-height: 36px;
+    font-size: 12px;
+    text-align: left;
+    border: 0;
+    background: transparent;
+  }
+  .file-menu button:hover {
+    background: var(--hover-bg);
+  }
+  .menu-label {
+    color: var(--color-muted);
+    font-size: 11px;
+    padding: 5px 10px 8px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .file-menu .delete-action {
+    color: var(--danger);
+  }
+  .menu-separator {
+    height: 1px;
+    background: var(--border-color);
+    margin: 5px 0;
+  }
+  .delete-name {
+    display: flex;
+    gap: 10px;
+    padding: 14px;
+    background: var(--danger-bg);
+    color: var(--danger);
+    border-radius: 7px;
+    overflow-wrap: anywhere;
+  }
+  .delete-name strong {
+    min-width: 0;
+    font-size: 13px;
+    font-weight: 550;
+  }
+  .root-drop {
+    padding: 18px 8px;
+    margin-top: 15px;
+    border: 1px dashed var(--border-strong);
+    border-radius: 8px;
+    font-size: 11px;
+    text-align: center;
+    color: var(--color-muted);
+  }
+  .root-drop.over {
+    border-color: var(--primary);
+    color: var(--primary);
+    background: var(--primary-soft);
+  }
+  @media (max-width: 768px) {
+    .sidebar {
+      position: fixed;
+      inset: 0 auto 0 0;
+      width: min(296px, 86vw);
+      min-width: 0;
+      z-index: 300;
+      padding-top: max(18px, env(safe-area-inset-top));
+      padding-bottom: max(16px, env(safe-area-inset-bottom));
+      box-shadow: var(--shadow-lg);
+    }
+    .primary-navigation button,
+    .search-launcher,
+    .file-menu button {
+      min-height: 44px;
+    }
+    .sidebar-footer select {
+      min-height: 44px;
+    }
+    .sidebar-footer {
+      padding-top: 6px;
+    }
   }
 </style>
