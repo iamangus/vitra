@@ -1,10 +1,14 @@
 package vector
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"os"
+	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -13,284 +17,364 @@ import (
 	"github.com/philippgille/chromem-go"
 )
 
-// ChromemStore implements VectorStore backed by an embedded chromem-go DB.
-//
-// It uses an OpenAI-compatible EmbeddingClient for generating embeddings,
-// wraps it as a chromem.EmbeddingFunc for the collection's query path, and
-// stores pre-computed embeddings alongside note chunks as documents.
 type ChromemStore struct {
-	db        *chromem.DB
-	coll      *chromem.Collection
-	embedder  *EmbeddingClient
-	collName  string
-
-	// mu guards pathEmbeddings which caches one (averaged) embedding per note
-	// path so FindSimilarFiles can retrieve a reference vector without reading
-	// the note file from disk (the store has no knowledge of the vault path).
-	mu            sync.RWMutex
+	mu             sync.RWMutex
+	db             *chromem.DB
+	coll           *chromem.Collection
+	embedder       *EmbeddingClient
+	persistPath    string
+	model          string
 	pathEmbeddings map[string][]float32
 }
 
-// NewChromemStore opens (or creates) a persistent chromem-go DB at persistPath
-// (use "" for in-memory) and ensures the notes collection exists. When the
-// embedder has no API key configured the store still works for read paths but
-// indexing/querying will return an error from the embedding API.
+type snapshot struct {
+	Model      string
+	Data       []byte
+	Embeddings map[string][]float32
+}
+
 func NewChromemStore(persistPath string, compress bool, embedder *EmbeddingClient) (*ChromemStore, error) {
 	if embedder == nil {
 		embedder = NewEmbeddingClient()
 	}
-
-	var db *chromem.DB
+	c := &ChromemStore{db: chromem.NewDB(), embedder: embedder, persistPath: persistPath, model: embedder.Model + "@" + embedder.BaseURL, pathEmbeddings: map[string][]float32{}}
+	if persistPath != "" {
+		if err := os.MkdirAll(persistPath, 0700); err != nil {
+			return nil, err
+		}
+		data, err := os.ReadFile(filepath.Join(persistPath, "snapshot.json"))
+		if err == nil {
+			var state snapshot
+			if err := json.Unmarshal(data, &state); err != nil {
+				return nil, fmt.Errorf("read vector snapshot: %w", err)
+			}
+			if err := c.db.ImportFromReader(bytes.NewReader(state.Data), ""); err != nil {
+				return nil, err
+			}
+			c.model = state.Model
+			if state.Embeddings != nil {
+				c.pathEmbeddings = state.Embeddings
+			}
+		} else if !os.IsNotExist(err) {
+			return nil, err
+		}
+	}
 	var err error
-	if persistPath == "" {
-		db = chromem.NewDB()
-	} else {
-		if err := os.MkdirAll(persistPath, 0755); err != nil {
-			return nil, fmt.Errorf("create chromem dir: %w", err)
-		}
-		db, err = chromem.NewPersistentDB(persistPath, compress)
-		if err != nil {
-			return nil, fmt.Errorf("open persistent chromem db: %w", err)
-		}
-	}
-
-	const collName = "vitra_notes"
-	embedFunc := chromem.EmbeddingFunc(func(ctx context.Context, text string) ([]float32, error) {
-		return embedder.EmbedText(text)
-	})
-	coll, err := db.GetOrCreateCollection(collName, nil, embedFunc)
-	if err != nil {
-		return nil, fmt.Errorf("create chromem collection: %w", err)
-	}
-
-	return &ChromemStore{
-		db:             db,
-		coll:           coll,
-		embedder:       embedder,
-		collName:       collName,
-		pathEmbeddings: make(map[string][]float32),
-	}, nil
+	c.coll, err = c.db.GetOrCreateCollection("vitra_notes", nil, nil)
+	return c, err
 }
 
-// IndexNote chunks-are-already-provided: we embed them in batch and add as
-// documents. Existing chunks for the same path are removed first so re-writes
-// don't accumulate stale entries.
-func (c *ChromemStore) IndexNote(ctx context.Context, path string, chunks []Chunk) error {
-	if len(chunks) == 0 {
-		return nil
+func cloneDB(db *chromem.DB) (*chromem.DB, error) {
+	var data bytes.Buffer
+	if err := db.ExportToWriter(&data, false, ""); err != nil {
+		return nil, err
 	}
-
-	// Remove any previously-stored chunks for this path.
-	if err := c.coll.Delete(ctx, map[string]string{"path": path}, nil); err != nil {
-		// Non-fatal on first index of a new path.
-		fmt.Fprintf(os.Stderr, "chromem: delete before re-index %s: %v\n", path, err)
+	copy := chromem.NewDB()
+	if err := copy.ImportFromReader(bytes.NewReader(data.Bytes()), ""); err != nil {
+		return nil, err
 	}
+	return copy, nil
+}
 
+func (c *ChromemStore) publish(ctx context.Context, db *chromem.DB, embeddings map[string][]float32, model string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	coll, err := db.GetOrCreateCollection("vitra_notes", nil, nil)
+	if err != nil {
+		return err
+	}
+	if c.persistPath != "" {
+		var data bytes.Buffer
+		if err := db.ExportToWriter(&data, false, ""); err != nil {
+			return err
+		}
+		encoded, err := json.Marshal(snapshot{Model: model, Data: data.Bytes(), Embeddings: embeddings})
+		if err != nil {
+			return err
+		}
+		file, err := os.CreateTemp(c.persistPath, ".snapshot-*")
+		if err != nil {
+			return err
+		}
+		defer os.Remove(file.Name())
+		if _, err = file.Write(encoded); err == nil {
+			err = file.Sync()
+		}
+		closeErr := file.Close()
+		if err != nil {
+			return err
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := os.Rename(file.Name(), filepath.Join(c.persistPath, "snapshot.json")); err != nil {
+			return err
+		}
+		c.db, c.coll, c.pathEmbeddings, c.model = db, coll, embeddings, model
+		if runtime.GOOS == "windows" {
+			return nil
+		}
+		dir, err := os.Open(c.persistPath)
+		if err != nil {
+			return err
+		}
+		err = dir.Sync()
+		dir.Close()
+		if err != nil {
+			return err
+		}
+	}
+	c.db, c.coll, c.pathEmbeddings, c.model = db, coll, embeddings, model
+	return nil
+}
+
+func (c *ChromemStore) prepare(ctx context.Context, path string, chunks []Chunk) ([]chromem.Document, []float32, error) {
 	texts := make([]string, len(chunks))
 	for i, ch := range chunks {
 		texts[i] = ch.Text
 	}
-	embeddings, err := c.embedder.EmbedTexts(texts)
+	embeddings, err := c.embedder.EmbedTextsContext(ctx, texts)
 	if err != nil {
-		return fmt.Errorf("embed chunks: %w", err)
+		return nil, nil, err
 	}
-
-	ids := make([]string, len(chunks))
-	metas := make([]map[string]string, len(chunks))
-	contents := make([]string, len(chunks))
+	docs := make([]chromem.Document, len(chunks))
 	for i, ch := range chunks {
-		ids[i] = fmt.Sprintf("%s#%d", path, ch.Index)
-		meta := map[string]string{
-			"path":    path,
-			"title":   getTitleFromPath(path),
-			"heading": ch.Heading,
-			"index":   fmt.Sprintf("%d", ch.Index),
-			"type":    ch.Type,
+		title := ch.Title
+		if title == "" {
+			title = getTitleFromPath(path)
 		}
+		meta := map[string]string{"path": path, "title": title, "heading": ch.Heading, "index": strconv.Itoa(i), "type": ch.Type}
 		for _, tag := range ch.Tags {
-			tag = strings.ReplaceAll(strings.ToLower(tag), " ", "_")
-			meta["tag_"+tag] = "1"
+			meta["tag_"+strings.ToLower(strings.TrimSpace(tag))] = "1"
 		}
-		metas[i] = meta
-		contents[i] = ch.Text
+		docs[i] = chromem.Document{ID: fmt.Sprintf("%s#%d", path, i), Embedding: embeddings[i], Metadata: meta, Content: ch.Text}
 	}
-
-	if err := c.coll.Add(ctx, ids, embeddings, metas, contents); err != nil {
-		return fmt.Errorf("add documents: %w", err)
-	}
-
-	// Cache an averaged embedding for FindSimilarFiles.
-	if avg := averageEmbeddings(embeddings); avg != nil {
-		c.mu.Lock()
-		c.pathEmbeddings[path] = avg
-		c.mu.Unlock()
-	}
-	return nil
+	return docs, averageEmbeddings(embeddings), nil
 }
 
-// DeleteNote removes all chunks for a path from the store.
-func (c *ChromemStore) DeleteNote(ctx context.Context, path string) error {
-	if err := c.coll.Delete(ctx, map[string]string{"path": path}, nil); err != nil {
-		return fmt.Errorf("delete note %s: %w", path, err)
+func (c *ChromemStore) IndexNote(ctx context.Context, path string, chunks []Chunk) error {
+	docs, avg, err := c.prepare(ctx, path, chunks)
+	if err != nil {
+		return fmt.Errorf("embed %s: %w", path, err)
 	}
 	c.mu.Lock()
-	delete(c.pathEmbeddings, path)
-	c.mu.Unlock()
-	return nil
+	defer c.mu.Unlock()
+	if c.coll.Count() > 0 && c.model != c.embedder.Model+"@"+c.embedder.BaseURL {
+		return fmt.Errorf("embedding model changed; full reindex required")
+	}
+	db, err := cloneDB(c.db)
+	if err != nil {
+		return err
+	}
+	coll := db.GetCollection("vitra_notes", nil)
+	if err := coll.Delete(ctx, map[string]string{"path": path}, nil); err != nil {
+		return err
+	}
+	if len(docs) > 0 {
+		if err := coll.AddDocuments(ctx, docs, 1); err != nil {
+			return err
+		}
+	}
+	cache := c.copyEmbeddings()
+	if len(avg) > 0 {
+		cache[path] = avg
+	} else {
+		delete(cache, path)
+	}
+	return c.publish(ctx, db, cache, c.model)
 }
 
-// SemanticSearch embeds the query, retrieves an expanded candidate set from
-// chromem, applies keyword boosting to bridge vocabulary gaps between the
-// query and note text, then returns the top N re-ranked results.
+func (c *ChromemStore) copyEmbeddings() map[string][]float32 {
+	copy := make(map[string][]float32, len(c.pathEmbeddings))
+	for p, emb := range c.pathEmbeddings {
+		copy[p] = emb
+	}
+	return copy
+}
+
+func (c *ChromemStore) DeleteNote(ctx context.Context, path string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	db, err := cloneDB(c.db)
+	if err != nil {
+		return err
+	}
+	coll := db.GetCollection("vitra_notes", nil)
+	cache := c.copyEmbeddings()
+	for p := range cache {
+		if p == path || strings.HasPrefix(p, path+"/") {
+			if err := coll.Delete(ctx, map[string]string{"path": p}, nil); err != nil {
+				return err
+			}
+			delete(cache, p)
+		}
+	}
+	return c.publish(ctx, db, cache, c.model)
+}
+
+func (c *ChromemStore) ReplaceNotes(ctx context.Context, notes map[string][]Chunk) error {
+	db := chromem.NewDB()
+	coll, err := db.GetOrCreateCollection("vitra_notes", nil, nil)
+	if err != nil {
+		return err
+	}
+	cache := map[string][]float32{}
+	paths := make([]string, 0, len(notes))
+	for p := range notes {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+	for _, p := range paths {
+		docs, avg, err := c.prepare(ctx, p, notes[p])
+		if err != nil {
+			return err
+		}
+		if len(docs) > 0 {
+			if err := coll.AddDocuments(ctx, docs, 1); err != nil {
+				return err
+			}
+			cache[p] = avg
+		}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.publish(ctx, db, cache, c.embedder.Model+"@"+c.embedder.BaseURL)
+}
+
+func (c *ChromemStore) ReindexVault(ctx context.Context, vaultPath string) error {
+	return fmt.Errorf("use ReplaceNotes with a validated vault snapshot")
+}
+
 func (c *ChromemStore) SemanticSearch(ctx context.Context, query string, limit int, filter Filter) ([]SearchResult, error) {
 	if limit <= 0 {
 		limit = 5
 	}
-
-	emb, err := c.embedder.EmbedText(query)
-	if err != nil {
-		return nil, fmt.Errorf("embed query: %w", err)
+	if limit > 100 {
+		return nil, fmt.Errorf("limit must not exceed 100")
 	}
-
-	where := buildWhere(filter)
-
-	// Fetch more candidates than needed so re-ranking has room to work.
-	fetchLimit := limit * 4
-	if fetchLimit < 20 {
-		fetchLimit = 20
+	c.mu.RLock()
+	empty := c.coll.Count() == 0
+	c.mu.RUnlock()
+	if empty {
+		return []SearchResult{}, nil
 	}
-
-	results, err := c.coll.QueryEmbedding(ctx, emb, fetchLimit, where, nil)
+	emb, err := c.embedder.EmbedTextContext(ctx, query)
 	if err != nil {
 		return nil, err
 	}
-
-	searchResults := c.toSearchResults(results)
-
-	// Keyword boosting: adjust distance scores based on literal keyword overlap.
-	// Disabled when HYBRID_BOOST_FACTOR is 0 or unset.
-	if bf := hybridBoostFactor(); bf > 0 {
-		keywords := extractKeywords(query)
-		if len(keywords) > 0 {
-			applyKeywordBoost(searchResults, keywords, bf)
-			sort.Slice(searchResults, func(i, j int) bool {
-				return searchResults[i].Distance < searchResults[j].Distance
-			})
-		}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.model != c.embedder.Model+"@"+c.embedder.BaseURL {
+		return nil, fmt.Errorf("embedding model changed; full reindex required")
 	}
-
-	if len(searchResults) > limit {
-		searchResults = searchResults[:limit]
+	count := c.coll.Count()
+	if count == 0 {
+		return []SearchResult{}, nil
 	}
-
-	return searchResults, nil
+	results, err := c.coll.QueryEmbedding(ctx, emb, min(count, max(20, limit*4)), buildWhere(filter), nil)
+	if err != nil {
+		return nil, err
+	}
+	out := toSearchResults(results)
+	applyKeywordBoost(out, extractKeywords(query), hybridBoostFactor())
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Distance < out[j].Distance })
+	return uniqueResults(out, limit, ""), nil
 }
 
-// FindSimilarFiles returns notes semantically similar to the given path,
-// excluding the note itself.
+func uniqueResults(results []SearchResult, limit int, exclude string) []SearchResult {
+	out := []SearchResult{}
+	seen := map[string]bool{}
+	for _, r := range results {
+		if r.Path == exclude || seen[r.Path] {
+			continue
+		}
+		seen[r.Path] = true
+		out = append(out, r)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
 func (c *ChromemStore) FindSimilarFiles(ctx context.Context, path string, limit int, filter Filter) ([]SearchResult, error) {
 	if limit <= 0 {
 		limit = 5
 	}
+	if limit > 100 {
+		return nil, fmt.Errorf("limit must not exceed 100")
+	}
 	c.mu.RLock()
+	defer c.mu.RUnlock()
 	emb, ok := c.pathEmbeddings[path]
-	c.mu.RUnlock()
 	if !ok {
 		return nil, fmt.Errorf("note not indexed: %s", path)
 	}
-	where := buildWhere(filter)
-	results, err := c.coll.QueryEmbedding(ctx, emb, limit+20, where, nil)
+	results, err := c.coll.QueryEmbedding(ctx, emb, c.coll.Count(), buildWhere(filter), nil)
 	if err != nil {
 		return nil, err
 	}
-	all := c.toSearchResults(results)
-
-	var filtered []SearchResult
-	seen := make(map[string]bool)
-	for _, r := range all {
-		if r.Path == path || seen[r.Path] {
-			continue
-		}
-		seen[r.Path] = true
-		filtered = append(filtered, r)
-		if len(filtered) >= limit {
-			break
-		}
-	}
-	return filtered, nil
+	return uniqueResults(toSearchResults(results), limit, path), nil
 }
 
-// CheckDuplicate finds an existing note whose similarity to `content` is at
-// least `threshold` (cosine similarity, higher = more similar).
 func (c *ChromemStore) CheckDuplicate(ctx context.Context, content string, threshold float32) (*SearchResult, error) {
 	if threshold <= 0 {
-		threshold = 0.95
+		threshold = .95
 	}
-	results, err := c.SemanticSearch(ctx, content, 1, Filter{})
+	c.mu.RLock()
+	empty := c.coll.Count() == 0
+	c.mu.RUnlock()
+	if empty {
+		return nil, nil
+	}
+	emb, err := c.embedder.EmbedTextContext(ctx, content)
 	if err != nil {
 		return nil, err
 	}
-	if len(results) == 0 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.coll.Count() == 0 {
 		return nil, nil
 	}
-	// Distance is stored as 1 - similarity, so similarity = 1 - distance.
-	similarity := float32(1.0) - results[0].Distance
-	if similarity >= threshold {
-		return &results[0], nil
-	}
-	return nil, nil
-}
-
-// ReindexVault drops the collection (and its documents) so the caller can
-// re-populate it from scratch.
-func (c *ChromemStore) ReindexVault(ctx context.Context, vaultPath string) error {
-	_ = vaultPath // collection is dropped & recreated
-	if err := c.db.DeleteCollection(c.collName); err != nil {
-		return fmt.Errorf("delete collection: %w", err)
-	}
-	embedFunc := chromem.EmbeddingFunc(func(ctx context.Context, text string) ([]float32, error) {
-		return c.embedder.EmbedText(text)
-	})
-	coll, err := c.db.GetOrCreateCollection(c.collName, nil, embedFunc)
+	results, err := c.coll.QueryEmbedding(ctx, emb, 1, nil, nil)
 	if err != nil {
-		return fmt.Errorf("recreate collection: %w", err)
+		return nil, err
 	}
-	c.coll = coll
-	c.mu.Lock()
-	c.pathEmbeddings = make(map[string][]float32)
-	c.mu.Unlock()
-	return nil
+	if len(results) == 0 || results[0].Similarity < threshold {
+		return nil, nil
+	}
+	out := toSearchResults(results)
+	return &out[0], nil
 }
 
-// Close is a no-op for the embedded store; persistence is flushed on each write.
 func (c *ChromemStore) Close() error { return nil }
 
-// toSearchResults converts chromem results into VectorStore results, encoding
-// similarity as Distance = 1 - similarity to preserve the "lower is better"
-// convention used by the rest of the vector package.
-func (c *ChromemStore) toSearchResults(results []chromem.Result) []SearchResult {
+func (c *ChromemStore) Paths() []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	paths := make([]string, 0, len(c.pathEmbeddings))
+	for path := range c.pathEmbeddings {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	return paths
+}
+
+func toSearchResults(results []chromem.Result) []SearchResult {
 	out := make([]SearchResult, 0, len(results))
 	for _, r := range results {
-		path := r.Metadata["path"]
-		title := r.Metadata["title"]
-		heading := r.Metadata["heading"]
-		typ := r.Metadata["type"]
-		var tags []string
+		tags := []string{}
 		for k, v := range r.Metadata {
 			if strings.HasPrefix(k, "tag_") && v == "1" {
 				tags = append(tags, strings.TrimPrefix(k, "tag_"))
 			}
 		}
 		sort.Strings(tags)
-		out = append(out, SearchResult{
-			Path:     path,
-			Title:    title,
-			Heading:  heading,
-			Chunk:    r.Content,
-			Distance: 1.0 - r.Similarity,
-			Type:     typ,
-			Tags:     tags,
-		})
+		out = append(out, SearchResult{Path: r.Metadata["path"], Title: r.Metadata["title"], Heading: r.Metadata["heading"], Chunk: r.Content, Distance: 1 - r.Similarity, Type: r.Metadata["type"], Tags: tags})
 	}
 	return out
 }
@@ -299,105 +383,72 @@ func averageEmbeddings(embeddings [][]float32) []float32 {
 	if len(embeddings) == 0 {
 		return nil
 	}
-	dim := len(embeddings[0])
-	avg := make([]float32, dim)
+	avg := make([]float32, len(embeddings[0]))
 	for _, emb := range embeddings {
-		for i, v := range emb {
-			avg[i] += v
+		if len(emb) != len(avg) {
+			return nil
 		}
-	}
-	for i := range avg {
-		avg[i] /= float32(len(embeddings))
+		for i, v := range emb {
+			avg[i] += v / float32(len(embeddings))
+		}
 	}
 	return avg
 }
 
-// buildWhere translates an OKF Filter into a chromem `where` map. chromem
-// matches all keys exactly (AND across keys). For tag filtering we emit one
-// key per required tag (tag_<slug> = "1"); chromem's AND across keys gives the
-// intersection (AND) semantics specified in the plan.
-func buildWhere(f Filter) map[string]string {
-	if f.Type == "" && len(f.Tags) == 0 {
-		return nil
+func buildWhere(filter Filter) map[string]string {
+	where := map[string]string{}
+	if filter.Type != "" {
+		where["type"] = filter.Type
 	}
-	w := map[string]string{}
-	if f.Type != "" {
-		w["type"] = f.Type
-	}
-	for _, tag := range f.Tags {
-		tag = strings.ReplaceAll(strings.ToLower(strings.TrimSpace(tag)), " ", "_")
-		if tag == "" {
-			continue
+	for _, tag := range filter.Tags {
+		if tag = strings.ToLower(strings.TrimSpace(tag)); tag != "" {
+			where["tag_"+tag] = "1"
 		}
-		w["tag_"+tag] = "1"
 	}
-	return w
+	return where
 }
 
-func getTitleFromPath(path string) string {
-	parts := strings.Split(path, "/")
-	if len(parts) == 0 {
-		return path
-	}
-	return parts[len(parts)-1]
-}
+func getTitleFromPath(path string) string { return filepath.Base(path) }
 
 var stopWords = map[string]bool{
-	"a": true, "an": true, "the": true, "is": true, "are": true, "was": true, "were": true,
-	"in": true, "on": true, "at": true, "to": true, "for": true, "of": true, "with": true,
-	"and": true, "or": true, "but": true, "not": true, "it": true, "this": true, "that": true,
-	"be": true, "how": true, "what": true, "when": true, "where": true, "who": true, "why": true,
-	"do": true, "does": true, "did": true, "can": true, "will": true, "would": true,
-	"could": true, "should": true, "may": true, "might": true, "has": true, "have": true,
-	"had": true, "been": true, "being": true, "our": true, "my": true, "your": true,
-	"their": true, "we": true, "you": true, "us": true, "them": true, "me": true,
-	"him": true, "her": true, "its": true, "by": true, "from": true, "than": true,
-	"into": true, "up": true, "out": true, "i": true, "he": true, "she": true,
-	"they": true, "more": true, "no": true, "just": true, "so": true, "if": true,
-	"as": true, "also": true, "about": true, "over": true, "only": true, "very": true,
+	"a": true, "an": true, "the": true, "is": true, "are": true, "was": true, "were": true, "in": true, "on": true, "at": true, "to": true, "for": true, "of": true, "with": true, "and": true, "or": true, "but": true, "not": true, "it": true, "this": true, "that": true, "be": true, "how": true, "what": true, "when": true, "where": true, "who": true, "why": true, "do": true, "does": true, "did": true, "can": true, "will": true, "would": true, "could": true, "should": true, "may": true, "might": true, "has": true, "have": true, "had": true, "been": true, "being": true, "our": true, "my": true, "your": true, "their": true, "we": true, "you": true, "us": true, "them": true, "me": true, "him": true, "her": true, "its": true, "by": true, "from": true, "than": true, "into": true, "up": true, "out": true, "i": true, "he": true, "she": true, "they": true, "more": true, "no": true, "just": true, "so": true, "if": true, "as": true, "also": true, "about": true, "over": true, "only": true, "very": true,
 }
 
 func extractKeywords(query string) []string {
-	seen := make(map[string]bool)
-	var keywords []string
+	seen := map[string]bool{}
+	out := []string{}
 	for _, word := range strings.Fields(strings.ToLower(query)) {
 		word = strings.Trim(word, `"'.,;:!?()[]{}`)
-		if len(word) < 2 || stopWords[word] {
-			continue
+		if len(word) > 1 && !seen[word] && !stopWords[word] {
+			seen[word] = true
+			out = append(out, word)
 		}
-		if seen[word] {
-			continue
-		}
-		seen[word] = true
-		keywords = append(keywords, word)
 	}
-	return keywords
+	return out
 }
 
-func applyKeywordBoost(results []SearchResult, keywords []string, boostFactor float64) {
+func applyKeywordBoost(results []SearchResult, keywords []string, factor float64) {
+	if len(keywords) == 0 || factor <= 0 {
+		return
+	}
 	for i := range results {
-		chunkLower := strings.ToLower(results[i].Chunk)
-		titleLower := strings.ToLower(results[i].Title)
-		var matches float64
-		for _, kw := range keywords {
-			if strings.Contains(chunkLower, kw) || strings.Contains(titleLower, kw) {
+		text := strings.ToLower(results[i].Title + " " + results[i].Chunk)
+		matches := 0
+		for _, word := range keywords {
+			if strings.Contains(text, word) {
 				matches++
 			}
 		}
-		if len(keywords) > 0 && matches > 0 {
-			keywordScore := matches / float64(len(keywords))
-			similarity := 1.0 - float64(results[i].Distance)
-			boostedSim := similarity * (1.0 + boostFactor*keywordScore)
-			results[i].Distance = float32(math.Max(0.0, 1.0-boostedSim))
-		}
+		sim := 1 - float64(results[i].Distance)
+		results[i].Distance = float32(math.Max(0, 1-sim*(1+factor*float64(matches)/float64(len(keywords)))))
 	}
 }
 
 func hybridBoostFactor() float64 {
-	if v := os.Getenv("HYBRID_BOOST_FACTOR"); v != "" {
-		if f, err := strconv.ParseFloat(v, 64); err == nil {
-			return f
+	if raw := os.Getenv("HYBRID_BOOST_FACTOR"); raw != "" {
+		if n, err := strconv.ParseFloat(raw, 64); err == nil && !math.IsNaN(n) && !math.IsInf(n, 0) && n >= 0 && n <= 1 {
+			return n
 		}
 	}
-	return 0.2
+	return .2
 }

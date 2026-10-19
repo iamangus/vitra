@@ -20,12 +20,12 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.25'
+          go-version-file: go.mod
 
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24'
           cache: 'npm'
           cache-dependency-path: frontend/package-lock.json
 
@@ -37,11 +37,29 @@ jobs:
         run: npm run build
         working-directory: ./frontend
 
+      - name: Check frontend and unit tests
+        run: npm run check && npm test && npm audit --audit-level=moderate
+        working-directory: ./frontend
+
       - name: Verify Go modules
         run: go mod verify
 
       - name: Build Go binary
         run: go build -v ./cmd/vitra
+
+      - name: Go static and regression checks
+        run: go vet ./... && go test -race ./...
+
+      - name: Go vulnerability reachability
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+
+      - name: Install browser
+        run: npx playwright install --with-deps chromium
+        working-directory: ./frontend
+
+      - name: Browser workflow tests
+        run: npm run test:e2e
+        working-directory: ./frontend
 
       - name: Login to GitHub Container Registry
         if: github.event_name != 'pull_request'
@@ -71,3 +89,25 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Build local test image
+        run: docker build --build-arg TARGETARCH=amd64 -t vitra:verify .
+
+      - name: Verify non-root container with mounted persistence
+        run: |
+          docker run -d --name vitra-verify -p 127.0.0.1:18090:8080 --read-only --cap-drop ALL --security-opt no-new-privileges -v vitra-test-vault:/data/vault -v vitra-test-index:/data/index vitra:verify
+          trap 'docker logs vitra-verify; docker rm -f vitra-verify; docker volume rm vitra-test-vault vitra-test-index' EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:18090/healthz; then break; fi
+            sleep 1
+          done
+          curl --fail http://127.0.0.1:18090/readyz
+          curl --fail -H 'Content-Type: application/json' -d '{"path":"container-test"}' http://127.0.0.1:18090/api/notes
+          curl --fail http://127.0.0.1:18090/api/note/container-test
+          test "$(docker exec vitra-verify id -u)" = 10001
+          docker restart vitra-verify
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:18090/api/note/container-test; then break; fi
+            sleep 1
+          done
+          curl --fail http://127.0.0.1:18090/api/note/container-test

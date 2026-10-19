@@ -1,39 +1,27 @@
 import { writable } from 'svelte/store';
 
 function createThemeStore() {
-  const saved = localStorage.getItem('theme');
-  const systemDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-  const initial = saved || 'system';
-  const isDark = initial === 'dark' || (initial === 'system' && systemDark);
-
-  if (isDark) {
-    document.documentElement.classList.add('dark');
+  let mode = 'system';
+  try { const saved = localStorage.getItem('theme'); if (['system', 'light', 'dark'].includes(saved)) mode = saved; } catch {}
+  const preference = window.matchMedia('(prefers-color-scheme: dark)');
+  const { subscribe, set } = writable('light');
+  function apply() {
+    const dark = mode === 'dark' || (mode === 'system' && preference.matches);
+    document.documentElement.classList.toggle('dark', dark);
+    document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
+    set(dark ? 'dark' : 'light');
   }
-  document.documentElement.setAttribute('data-theme', initial);
-
-  const { subscribe, set } = writable(initial);
-
+  preference.addEventListener('change', () => { if (mode === 'system') apply(); });
+  apply();
   return {
     subscribe,
-    set: (value) => {
-      localStorage.setItem('theme', value);
-      document.documentElement.setAttribute('data-theme', value);
-      const dark = value === 'dark' || (value === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
-      if (dark) {
-        document.documentElement.classList.add('dark');
-      } else {
-        document.documentElement.classList.remove('dark');
-      }
-      set(value);
+    set(value) {
+      if (!['system', 'light', 'dark'].includes(value)) return;
+      mode = value;
+      try { localStorage.setItem('theme', value); } catch {}
+      apply();
     },
-    toggle: () => {
-      const current = localStorage.getItem('theme') || 'system';
-      let next;
-      if (current === 'system') next = 'dark';
-      else if (current === 'dark') next = 'light';
-      else next = 'system';
-      theme.set(next);
-    }
+    toggle() { this.set(mode === 'system' ? 'dark' : mode === 'dark' ? 'light' : 'system'); },
   };
 }
 

@@ -37,7 +37,7 @@ Env vars (all optional, defaults shown):
 | `PORT`           | `8080`           | Web UI + MCP port                                 |
 | `SKILLS_DIR_NAME`| `skills`         | Subdirectory of the vault holding skill markdown  |
 | `CHROMEM_PATH`   | `<vault>/.chromem` | chromem-go persistence dir                     |
-| `EMBEDDING_API_URL` | (OpenRouter default) | OpenAI-compatible embedding endpoint        |
+| `EMBEDDING_API_URL` | `https://api.openai.com/v1` | OpenAI-compatible embedding base URL        |
 | `EMBEDDING_API_KEY` | —                | API key for embedding provider                   |
 | `EMBEDDING_MODEL`| `text-embedding-3-small` | Embedding model name                     |
 
@@ -61,7 +61,7 @@ cd frontend && npm run build   # frontend must build
 │   ├── markdown.go           # goldmark rendering with WikiLinks + frontmatter parser
 │   ├── live.go               # SSE live updates + fsnotify watcher
 │   ├── mcp/
-│   │   └── server.go         # MCP server (18 tools: vault + OKF)
+│   │   └── server.go         # MCP server (19 tools: vault + OKF + skills)
 │   ├── okf/
 │   │   └── okf.go            # OKF helpers: Extract, IsReservedFilename, ExtractOKFLinks, ParseLogEntries
 │   └── vector/

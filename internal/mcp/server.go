@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,6 +34,7 @@ func NewToolsServer(fs *internal.FileSystem) *server.StreamableHTTPServer {
 		mcp.WithDescription("Write or overwrite a note or skill in the vault"),
 		mcp.WithString("path", mcp.Required(), mcp.Description("Vault-relative path to the note or skill (without .md extension)")),
 		mcp.WithString("content", mcp.Required(), mcp.Description("Full markdown content of the note or skill")),
+		mcp.WithString("revision", mcp.Description("Revision returned by read_note; prevents overwriting concurrent changes")),
 	), handleWriteNote(fs))
 
 	s.AddTool(mcp.NewTool("create_note",
@@ -49,7 +51,7 @@ func NewToolsServer(fs *internal.FileSystem) *server.StreamableHTTPServer {
 
 	s.AddTool(mcp.NewTool("delete_note",
 		mcp.WithDescription("Delete a note or skill from the vault"),
-		mcp.WithString("path", mcp.Required(), mcp.Description("Vault-relative path to delete")),
+		mcp.WithString("path", mcp.Required(), mcp.Description("Vault-relative note ID (with or without .md) or directory; the vault root cannot be deleted")),
 	), handleDeleteNote(fs))
 
 	s.AddTool(mcp.NewTool("list_notes",
@@ -81,19 +83,24 @@ func NewToolsServer(fs *internal.FileSystem) *server.StreamableHTTPServer {
 	s.AddTool(mcp.NewTool("search_wiki",
 		mcp.WithDescription("Semantic search across the vault using vector similarity. Best results come from including specific technical terms, project names, or concepts in the query (e.g., 'Go embed Svelte SPA' not 'how do I build a website'). Prefer multiple targeted queries with different phrasings over a single conversational one."),
 		mcp.WithString("query", mcp.Required(), mcp.Description("Search query — use specific technical terms and concepts")),
-		mcp.WithNumber("limit", mcp.Description("Maximum number of results (default: 5)")),
+		mcp.WithNumber("limit", mcp.Min(1), mcp.Max(100), mcp.Description("Maximum number of results (default: 5)")),
+		mcp.WithString("type", mcp.Description("Filter by OKF type")),
+		mcp.WithString("tag", mcp.Description("Legacy single-tag filter")),
+		mcp.WithArray("tags", mcp.WithStringItems(), mcp.Description("Required tags, using AND semantics")),
 	), handleSearchWiki(fs))
 
 	s.AddTool(mcp.NewTool("find_similar_files",
 		mcp.WithDescription("Find files semantically similar to a given file"),
 		mcp.WithString("path", mcp.Required(), mcp.Description("Vault-relative path to the reference note")),
-		mcp.WithNumber("limit", mcp.Description("Maximum number of results (default: 5)")),
+		mcp.WithNumber("limit", mcp.Min(1), mcp.Max(100), mcp.Description("Maximum number of results (default: 5)")),
+		mcp.WithString("type", mcp.Description("Filter by OKF type")),
+		mcp.WithArray("tags", mcp.WithStringItems(), mcp.Description("Required tags, using AND semantics")),
 	), handleFindSimilar(fs))
 
 	s.AddTool(mcp.NewTool("suggest_links",
 		mcp.WithDescription("Suggest wiki-links for a note based on semantic similarity"),
 		mcp.WithString("path", mcp.Required(), mcp.Description("Vault-relative path to the note")),
-		mcp.WithNumber("limit", mcp.Description("Maximum number of suggestions (default: 5)")),
+		mcp.WithNumber("limit", mcp.Min(1), mcp.Max(100), mcp.Description("Maximum number of suggestions (default: 5)")),
 	), handleSuggestLinks(fs))
 
 	s.AddTool(mcp.NewTool("reindex_vault",
@@ -105,10 +112,11 @@ func NewToolsServer(fs *internal.FileSystem) *server.StreamableHTTPServer {
 	s.AddTool(mcp.NewTool("list_concepts",
 		mcp.WithDescription("List OKF concepts in the vault, optionally filtered by type/tags/resource/since"),
 		mcp.WithString("type", mcp.Description("Filter by OKF `type` frontmatter field")),
-		mcp.WithString("tag", mcp.Description("Filter by tag (single tag; repeat for AND semantics)")),
+		mcp.WithString("tag", mcp.Description("Legacy single-tag filter")),
+		mcp.WithArray("tags", mcp.WithStringItems(), mcp.Description("Required tags, using AND semantics")),
 		mcp.WithString("resource", mcp.Description("Filter by canonical resource URI")),
 		mcp.WithString("since", mcp.Description("ISO 8601 datetime; only notes with timestamp >= since")),
-		mcp.WithNumber("limit", mcp.Description("Maximum number of results (default: unlimited)")),
+		mcp.WithNumber("limit", mcp.Min(1), mcp.Max(10000), mcp.Description("Maximum number of results (default: 1000)")),
 	), handleListConcepts(fs))
 
 	s.AddTool(mcp.NewTool("get_linked_concepts",
@@ -119,13 +127,14 @@ func NewToolsServer(fs *internal.FileSystem) *server.StreamableHTTPServer {
 	s.AddTool(mcp.NewTool("get_transitive_closure",
 		mcp.WithDescription("Walk the OKF link graph from a seed concept up to `depth` hops, returning the transitive closure of reachable concepts"),
 		mcp.WithString("path", mcp.Required(), mcp.Description("Vault-relative path to the seed concept")),
-		mcp.WithNumber("depth", mcp.Description("Maximum hops (default: 2)")),
+		mcp.WithNumber("depth", mcp.Min(1), mcp.Max(20), mcp.Description("Maximum hops (default: 2)")),
 	), handleGetTransitiveClosure(fs))
 
 	s.AddTool(mcp.NewTool("update_note",
 		mcp.WithDescription("Merge frontmatter updates into an existing note or skill, preserving the body and auto-touching `timestamp` unless supplied"),
 		mcp.WithString("path", mcp.Required(), mcp.Description("Vault-relative path to the note or skill (without .md extension)")),
 		mcp.WithObject("frontmatter", mcp.Description("Key/value map of frontmatter fields to merge (overwrites existing keys)")),
+		mcp.WithString("revision", mcp.Description("Revision returned by read_note; rejects concurrent updates")),
 	), handleUpdateNote(fs))
 
 	s.AddTool(mcp.NewTool("get_index",
@@ -165,7 +174,7 @@ func handleWriteNote(fs *internal.FileSystem) func(context.Context, mcp.CallTool
 		if path == "" {
 			return nil, fmt.Errorf("path is required")
 		}
-		if err := fs.WriteNote(path, content); err != nil {
+		if _, err := fs.SaveNote(path, content, req.GetString("revision", ""), false); err != nil {
 			return nil, err
 		}
 		return mcp.NewToolResultText(fmt.Sprintf("Note written: %s", path)), nil
@@ -294,12 +303,16 @@ func handleSearchWiki(fs *internal.FileSystem) func(context.Context, mcp.CallToo
 		if query == "" {
 			return nil, fmt.Errorf("query is required")
 		}
-		limit := int(req.GetFloat("limit", 5))
+		limit, err := requestLimit(req, "limit", 5, 100)
+		if err != nil {
+			return nil, err
+		}
 		filter := vector.Filter{
 			Type: req.GetString("type", ""),
+			Tags: req.GetStringSlice("tags", nil),
 		}
 		if tag := req.GetString("tag", ""); tag != "" {
-			filter.Tags = []string{tag}
+			filter.Tags = append(filter.Tags, tag)
 		}
 		results, err := fs.SemanticSearch(ctx, query, limit, filter)
 		if err != nil {
@@ -316,9 +329,13 @@ func handleFindSimilar(fs *internal.FileSystem) func(context.Context, mcp.CallTo
 		if path == "" {
 			return nil, fmt.Errorf("path is required")
 		}
-		limit := int(req.GetFloat("limit", 5))
+		limit, err := requestLimit(req, "limit", 5, 100)
+		if err != nil {
+			return nil, err
+		}
 		filter := vector.Filter{
 			Type: req.GetString("type", ""),
+			Tags: req.GetStringSlice("tags", nil),
 		}
 		results, err := fs.FindSimilarFiles(ctx, path, limit, filter)
 		if err != nil {
@@ -335,7 +352,10 @@ func handleSuggestLinks(fs *internal.FileSystem) func(context.Context, mcp.CallT
 		if path == "" {
 			return nil, fmt.Errorf("path is required")
 		}
-		limit := int(req.GetFloat("limit", 5))
+		limit, err := requestLimit(req, "limit", 5, 100)
+		if err != nil {
+			return nil, err
+		}
 		results, err := fs.FindSimilarFiles(ctx, path, limit, vector.Filter{})
 		if err != nil {
 			return nil, err
@@ -346,7 +366,7 @@ func handleSuggestLinks(fs *internal.FileSystem) func(context.Context, mcp.CallT
 				"path":    r.Path,
 				"title":   r.Title,
 				"heading": r.Heading,
-				"link":    fmt.Sprintf("[[%s]]", r.Title),
+				"link":    fmt.Sprintf("[[%s]]", r.Path),
 			}
 		}
 		data, _ := json.MarshalIndent(suggestions, "", "  ")
@@ -371,11 +391,16 @@ func handleListConcepts(fs *internal.FileSystem) func(context.Context, mcp.CallT
 			Type:     req.GetString("type", ""),
 			Resource: req.GetString("resource", ""),
 			Since:    req.GetString("since", ""),
+			Tag:      req.GetStringSlice("tags", nil),
 		}
 		if tag := req.GetString("tag", ""); tag != "" {
-			filter.Tag = []string{tag}
+			filter.Tag = append(filter.Tag, tag)
 		}
-		filter.Limit = int(req.GetFloat("limit", 0))
+		limit, err := requestLimit(req, "limit", 1000, 10000)
+		if err != nil {
+			return nil, err
+		}
+		filter.Limit = limit
 		views, okfVersion, err := fs.ListConcepts(filter)
 		if err != nil {
 			return nil, err
@@ -433,7 +458,10 @@ func handleGetTransitiveClosure(fs *internal.FileSystem) func(context.Context, m
 		if path == "" {
 			return nil, fmt.Errorf("path is required")
 		}
-		depth := int(req.GetFloat("depth", 2))
+		depth, err := requestLimit(req, "depth", 2, 20)
+		if err != nil {
+			return nil, err
+		}
 		closure, err := fs.TransitiveClosure(path, depth)
 		if err != nil {
 			return nil, err
@@ -461,11 +489,19 @@ func handleUpdateNote(fs *internal.FileSystem) func(context.Context, mcp.CallToo
 		if !ok {
 			return nil, fmt.Errorf("frontmatter must be an object")
 		}
-		if err := fs.UpdateNoteMetadata(path, updates); err != nil {
+		if _, err := fs.PatchNote(path, updates, nil, req.GetString("revision", "")); err != nil {
 			return nil, err
 		}
 		return mcp.NewToolResultText(fmt.Sprintf("Updated: %s", path)), nil
 	}
+}
+
+func requestLimit(req mcp.CallToolRequest, key string, fallback, maximum int) (int, error) {
+	n := req.GetFloat(key, float64(fallback))
+	if math.IsNaN(n) || math.IsInf(n, 0) || n < 1 || n > float64(maximum) || math.Trunc(n) != n {
+		return 0, fmt.Errorf("%s must be an integer between 1 and %d", key, maximum)
+	}
+	return int(n), nil
 }
 
 func handleListSkills(fs *internal.FileSystem) func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -507,9 +543,10 @@ func handleGetIndex(fs *internal.FileSystem) func(context.Context, mcp.CallToolR
 		if scope != "" {
 			indexRel = strings.TrimSuffix(scope, "/") + "/index.md"
 		}
-		fullPath := filepath.Join(fs.VaultPath, indexRel)
-		if content, err := os.ReadFile(fullPath); err == nil {
+		if content, err := fs.ReadVaultFile(indexRel); err == nil {
 			return mcp.NewToolResultText(string(content)), nil
+		} else if !os.IsNotExist(err) {
+			return nil, err
 		}
 		var sb strings.Builder
 		base := scope

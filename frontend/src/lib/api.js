@@ -1,6 +1,11 @@
 const API_BASE = '/api';
 
-async function api(endpoint, options = {}) {
+export class APIError extends Error {
+  constructor(message, status) { super(message); this.status = status; }
+}
+
+async function api(endpoint, options = undefined) {
+  options ??= {};
   const url = `${API_BASE}${endpoint}`;
   const res = await fetch(url, {
     ...options,
@@ -10,7 +15,7 @@ async function api(endpoint, options = {}) {
   });
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(text || `HTTP ${res.status}`);
+    throw new APIError(text || `HTTP ${res.status}`, res.status);
   }
   if (res.status === 204) return null;
   const contentType = res.headers.get('content-type');
@@ -28,10 +33,10 @@ export const files = {
 };
 
 export const notes = {
-  get: (path) => api(`/note/${encodeURIComponent(path)}`),
-  save: (path, content) => api(`/note/${encodeURIComponent(path)}`, {
+  get: (path, signal = undefined) => api(`/note/${encodeURIComponent(path)}`, { signal }),
+  save: (path, content, revision) => api(`/note/${encodeURIComponent(path)}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'text/plain' },
+    headers: { 'Content-Type': 'text/plain', ...(revision ? { 'If-Match': revision } : {}) },
     body: content,
   }),
   create: (path) => api('/notes', {
@@ -39,10 +44,11 @@ export const notes = {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ path }),
   }),
-  preview: (path, content) => api(`/preview/${encodeURIComponent(path)}`, {
+  preview: (path, content, signal = undefined) => api(`/preview/${encodeURIComponent(path)}`, {
     method: 'POST',
     headers: { 'Content-Type': 'text/plain' },
     body: content,
+    signal,
   }),
 };
 

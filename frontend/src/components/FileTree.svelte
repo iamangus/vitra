@@ -41,8 +41,7 @@
   }
 
   function handleDragOver(e, node) {
-    const sourcePath = e.dataTransfer.getData('text/plain');
-    if (!sourcePath || !isValidDrop(sourcePath, node)) return;
+    if (!node.IsDir || !e.dataTransfer.types.includes('text/plain')) return;
     e.preventDefault();
     e.stopPropagation();
     e.dataTransfer.dropEffect = 'move';
@@ -129,6 +128,9 @@
   .file-tree-item {
     margin-bottom: 1px;
   }
+
+  .file-tree-item span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .file-tree-item svg { flex-shrink: 0; }
 
   .file-tree-item summary {
     display: flex;

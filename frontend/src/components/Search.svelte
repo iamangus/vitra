@@ -12,12 +12,14 @@
   let loading = false;
   let semanticError = '';
   let liveSearchTimeout;
+  let requestGeneration = 0;
 
-  $: if (query) {
+  $: if (query !== undefined) {
     performSearch();
   }
 
   async function performSearch() {
+    const generation = ++requestGeneration;
     if (!query) {
       results = [];
       return;
@@ -26,11 +28,14 @@
     semanticError = '';
     try {
       if (mode === 'semantic') {
-        results = await search.semantic(query);
+        const response = await search.semantic(query);
+        if (generation === requestGeneration) results = response;
       } else {
-        results = await search.query(query);
+        const response = await search.query(query);
+        if (generation === requestGeneration) results = response;
       }
     } catch (e) {
+      if (generation !== requestGeneration) return;
       console.error('Search failed:', e);
       if (mode === 'semantic') {
         semanticError = e.message || 'Semantic search unavailable';
@@ -39,7 +44,7 @@
         results = [];
       }
     } finally {
-      loading = false;
+      if (generation === requestGeneration) loading = false;
     }
   }
 
@@ -52,7 +57,7 @@
   function handleSubmit(e) {
     e.preventDefault();
     const formData = new FormData(e.target);
-    query = formData.get('q');
+    query = String(formData.get('q') || '');
     window.history.pushState({}, '', `/search?q=${encodeURIComponent(query)}`);
   }
 
@@ -63,6 +68,7 @@
       }
 
       clearTimeout(liveSearchTimeout);
+      requestGeneration++;
       liveSearchTimeout = setTimeout(() => {
         performSearch();
       }, 250);

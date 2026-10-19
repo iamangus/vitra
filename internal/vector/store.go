@@ -5,21 +5,22 @@ import "context"
 // Chunk represents a piece of a note with context
 type Chunk struct {
 	Text    string
+	Title   string
 	Index   int
-	Heading string // breadcrumb path like "Parent > Child"
-	Path    string // note path
-	Type    string // OKF concept type (default "Note")
+	Heading string   // breadcrumb path like "Parent > Child"
+	Path    string   // note path
+	Type    string   // OKF concept type (default "Note")
 	Tags    []string // OKF tags from frontmatter
 }
 
 // SearchResult represents a semantic search result
 type SearchResult struct {
-	Path     string  `json:"path"`
-	Title    string  `json:"title"`
-	Heading  string  `json:"heading"`
-	Chunk    string  `json:"chunk"`
-	Distance float32 `json:"distance"`
-	Type     string  `json:"type,omitempty"`
+	Path     string   `json:"path"`
+	Title    string   `json:"title"`
+	Heading  string   `json:"heading"`
+	Chunk    string   `json:"chunk"`
+	Distance float32  `json:"distance"`
+	Type     string   `json:"type,omitempty"`
 	Tags     []string `json:"tags,omitempty"`
 }
 

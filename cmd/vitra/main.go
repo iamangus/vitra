@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -11,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	iofs "io/fs"
 
@@ -36,6 +38,8 @@ func (lrw *loggingResponseWriter) Flush() {
 	}
 }
 
+func (lrw *loggingResponseWriter) Unwrap() http.ResponseWriter { return lrw.ResponseWriter }
+
 func loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		lrw := &loggingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
@@ -58,6 +62,7 @@ func intEnv(key string, def int) int {
 		if n, err := strconv.Atoi(v); err == nil {
 			return n
 		}
+		log.Fatalf("invalid integer for %s", key)
 	}
 	return def
 }
@@ -69,6 +74,16 @@ func main() {
 	chromemPath := env("CHROMEM_PATH", filepath.Join(vaultPath, ".chromem"))
 	chunkSize := intEnv("CHUNK_SIZE", 0)
 	chunkOverlap := intEnv("CHUNK_OVERLAP", 0)
+	portNumber, err := strconv.Atoi(port)
+	if err != nil || portNumber < 1 || portNumber > 65535 {
+		log.Fatal("PORT must be between 1 and 65535")
+	}
+	if chunkSize < 0 || chunkSize > 4000 || chunkOverlap < -1 || (chunkSize > 0 && chunkOverlap >= chunkSize) {
+		log.Fatal("invalid CHUNK_SIZE/CHUNK_OVERLAP")
+	}
+	if !filepath.IsLocal(skillsDirName) || skillsDirName == "." || strings.ContainsAny(skillsDirName, "/\\") || strings.HasPrefix(skillsDirName, ".") {
+		log.Fatal("SKILLS_DIR_NAME must be a visible directory name")
+	}
 
 	fs := internal.NewFileSystem(vaultPath)
 	fs.SetSkillsDir(skillsDirName)
@@ -76,10 +91,6 @@ func main() {
 	if err := fs.BuildIndex(); err != nil {
 		log.Fatalf("failed to build vault index: %v", err)
 	}
-	if err := fs.StartWatcher(); err != nil {
-		log.Fatalf("failed to start vault watcher: %v", err)
-	}
-	defer fs.CloseWatcher()
 
 	// Vector store: embedded chromem-go. Construction succeeds even without
 	// an embedding API key; embedding calls fail at use-time so the web UI and
@@ -90,9 +101,20 @@ func main() {
 	}
 	defer store.Close()
 	fs.SetVectorStore(store)
+	if err := fs.StartWatcher(); err != nil {
+		log.Fatalf("failed to start vault watcher: %v", err)
+	}
+	defer fs.CloseWatcher()
 	log.Printf("vector store initialized at %s", chromemPath)
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+	mux.HandleFunc("GET /readyz", fs.HandleStatus)
+	mux.HandleFunc("GET /api/status", fs.HandleStatus)
+	mux.HandleFunc("GET /api/skills", fs.HandleAPISkills)
 	mux.HandleFunc("GET /api/files", fs.HandleAPIFileTree)
 	mux.HandleFunc("GET /api/events", fs.HandleAPIEvents)
 	mux.HandleFunc("GET /api/note/{path...}", fs.HandleAPIViewNote)
@@ -141,9 +163,10 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	webServer := &http.Server{Addr: ":" + port, Handler: loggingMiddleware(mux)}
+	address := net.JoinHostPort(env("BIND_ADDRESS", "127.0.0.1"), port)
+	webServer := &http.Server{Addr: address, Handler: loggingMiddleware(internal.SecurityMiddleware(mux, strings.Split(env("ALLOWED_HOSTS", ""), ","))), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 20, BaseContext: func(net.Listener) context.Context { return ctx }}
 	go func() {
-		log.Printf("vitra web server listening on :%s (vault: %s, MCP at /mcp)", port, vaultPath)
+		log.Printf("vitra listening on %s (authentication disabled; vault: %s, MCP at /mcp)", address, vaultPath)
 		if err := webServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			errCh <- fmt.Errorf("web server: %w", err)
 		}
@@ -152,11 +175,17 @@ func main() {
 	select {
 	case <-ctx.Done():
 		log.Printf("shutting down...")
-		shutCtx, cancel := context.WithTimeout(context.Background(), 0)
+		shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		_ = mcpHandler.Shutdown(shutCtx)
-		_ = webServer.Shutdown(shutCtx)
+		if err := mcpHandler.Shutdown(shutCtx); err != nil {
+			log.Printf("MCP shutdown: %v", err)
+		}
+		if err := webServer.Shutdown(shutCtx); err != nil {
+			log.Printf("HTTP shutdown: %v", err)
+			_ = webServer.Close()
+		}
 	case err := <-errCh:
 		log.Printf("fatal: %v", err)
+		stop()
 	}
 }

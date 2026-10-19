@@ -3,13 +3,21 @@ package internal
 import (
 	"bytes"
 	"fmt"
+	"github.com/iamangus/vitra/internal/links"
+	nethtml "golang.org/x/net/html"
+	"golang.org/x/net/html/atom"
+	stdhtml "html"
+	"math"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 
+	"github.com/microcosm-cc/bluemonday"
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/renderer/html"
+	"gopkg.in/yaml.v3"
 )
 
 var (
@@ -17,7 +25,7 @@ var (
 	tagRegex      = regexp.MustCompile(`(?:^|\s)(#[\w\-/]+)`)
 )
 
-func renderMarkdown(content []byte, vaultPath string, index *VaultIndex) (string, error) {
+func renderMarkdown(content []byte, vaultPath string, index *VaultIndex, base ...string) (string, error) {
 	processed := preprocessObsidianSyntax(content, vaultPath, index)
 
 	var buf bytes.Buffer
@@ -30,7 +38,42 @@ func renderMarkdown(content []byte, vaultPath string, index *VaultIndex) (string
 		return "", err
 	}
 
-	return buf.String(), nil
+	nodes, err := nethtml.ParseFragment(strings.NewReader(buf.String()), &nethtml.Node{Type: nethtml.ElementNode, Data: "div", DataAtom: atom.Div})
+	if err != nil {
+		return "", err
+	}
+	dir := ""
+	if len(base) > 0 {
+		dir = base[0]
+	}
+	var rewrite func(*nethtml.Node)
+	rewrite = func(node *nethtml.Node) {
+		if node.Type == nethtml.ElementNode && node.Data == "a" {
+			for i, attr := range node.Attr {
+				if attr.Key == "href" {
+					u, err := url.Parse(attr.Val)
+					if err == nil && strings.HasSuffix(u.Path, ".md") {
+						if target := links.Resolve(attr.Val, dir); target != "" {
+							node.Attr[i].Val = "/note/" + url.PathEscape(target)
+						}
+					}
+				}
+			}
+		}
+		for child := node.FirstChild; child != nil; child = child.NextSibling {
+			rewrite(child)
+		}
+	}
+	buf.Reset()
+	for _, node := range nodes {
+		rewrite(node)
+		if err := nethtml.Render(&buf, node); err != nil {
+			return "", err
+		}
+	}
+	policy := bluemonday.UGCPolicy()
+	policy.AllowAttrs("class").Matching(regexp.MustCompile(`^(wikilink( missing)?|tag)$`)).OnElements("a")
+	return policy.Sanitize(buf.String()), nil
 }
 
 func preprocessObsidianSyntax(content []byte, vaultPath string, index *VaultIndex) []byte {
@@ -66,9 +109,9 @@ func preprocessObsidianSyntax(content []byte, vaultPath string, index *VaultInde
 
 		targetPath := findNotePath(target, vaultPath, index)
 		if targetPath != "" {
-			return fmt.Sprintf(`<a href="/note/%s" class="wikilink">%s</a>`, targetPath, display)
+			return fmt.Sprintf(`<a href="/note/%s" class="wikilink">%s</a>`, url.PathEscape(targetPath), stdhtml.EscapeString(display))
 		}
-		return fmt.Sprintf(`<a href="/note/%s" class="wikilink missing" hx-confirm="Create note '%s'?">%s</a>`, targetPath, target, display)
+		return fmt.Sprintf(`<a href="/note/%s" class="wikilink missing">%s</a>`, url.PathEscape(target), stdhtml.EscapeString(display))
 	})
 
 	text = tagRegex.ReplaceAllStringFunc(text, func(match string) string {
@@ -77,7 +120,7 @@ func preprocessObsidianSyntax(content []byte, vaultPath string, index *VaultInde
 			return match
 		}
 		tag := groups[1]
-		return fmt.Sprintf(` <a href="/search?q=%s" class="tag">%s</a>`, strings.TrimPrefix(tag, "#"), tag)
+		return fmt.Sprintf(` <a href="/search?q=%s" class="tag">%s</a>`, url.QueryEscape(strings.TrimPrefix(tag, "#")), stdhtml.EscapeString(tag))
 	})
 
 	for i := len(protected) - 1; i >= 0; i-- {
@@ -91,13 +134,14 @@ func findNotePath(title string, vaultPath string, index *VaultIndex) string {
 	title = strings.TrimSuffix(title, ".md")
 
 	if index != nil {
-		if p := index.FindPath(title); p != "" {
-			return p
-		}
+		return index.FindPath(title)
 	}
 
 	if strings.Contains(title, "/") || strings.Contains(title, string(filepath.Separator)) {
-		candidate := filepath.Join(vaultPath, title+".md")
+		candidate, err := safeVaultPath(vaultPath, title+".md")
+		if err != nil {
+			return ""
+		}
 		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
 			rel, _ := filepath.Rel(vaultPath, candidate)
 			return filepath.ToSlash(strings.TrimSuffix(rel, ".md"))
@@ -168,33 +212,60 @@ func ParseNote(content []byte) (frontmatter map[string]interface{}, body []byte)
 func parseNote(content []byte) (frontmatter map[string]interface{}, body []byte) {
 	frontmatter = make(map[string]interface{})
 	body = content
-
-	if !bytes.HasPrefix(content, []byte("---\n")) {
+	fm, rest, err := splitFrontmatter(content)
+	if err != nil || fm == nil {
 		return
 	}
-
-	parts := bytes.SplitN(content, []byte("---\n"), 3)
-	if len(parts) < 3 {
-		return
+	if err := yaml.Unmarshal(fm, &frontmatter); err != nil {
+		return map[string]interface{}{}, content
 	}
-
-	fmText := string(parts[1])
-	lines := strings.Split(fmText, "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		if idx := strings.Index(line, ":"); idx > 0 {
-			key := strings.TrimSpace(line[:idx])
-			value := strings.TrimSpace(line[idx+1:])
-			value = strings.Trim(value, `"'`)
-			frontmatter[key] = value
-		}
+	for key, value := range frontmatter {
+		frontmatter[key] = jsonMetadata(value)
 	}
-
-	body = bytes.TrimSpace(parts[2])
+	body = rest
 	return
+}
+
+func jsonMetadata(value interface{}) interface{} {
+	switch typed := value.(type) {
+	case map[interface{}]interface{}:
+		out := map[string]interface{}{}
+		for key, item := range typed {
+			out[fmt.Sprint(key)] = jsonMetadata(item)
+		}
+		return out
+	case map[string]interface{}:
+		for key, item := range typed {
+			typed[key] = jsonMetadata(item)
+		}
+		return typed
+	case []interface{}:
+		for i, item := range typed {
+			typed[i] = jsonMetadata(item)
+		}
+		return typed
+	case float64:
+		if math.IsNaN(typed) || math.IsInf(typed, 0) {
+			return fmt.Sprint(typed)
+		}
+	}
+	return value
+}
+
+func splitFrontmatter(content []byte) ([]byte, []byte, error) {
+	lines := bytes.SplitAfter(content, []byte("\n"))
+	if len(lines) == 0 || strings.TrimRight(string(lines[0]), "\r\n") != "---" {
+		return nil, content, nil
+	}
+	offset := len(lines[0])
+	start := offset
+	for _, line := range lines[1:] {
+		if strings.TrimRight(string(line), "\r\n") == "---" {
+			return content[start:offset], content[offset+len(line):], nil
+		}
+		offset += len(line)
+	}
+	return nil, content, fmt.Errorf("unterminated frontmatter")
 }
 
 func buildBreadcrumbs(path string) []map[string]string {

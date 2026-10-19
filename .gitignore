@@ -32,6 +32,10 @@ Thumbs.db
 # Vitra state (app-specific, not Obsidian)
 .vitra/
 vault-tmp/
+vault/
+.chromem/
+playwright-report/
+test-results/
 
 # Frontend build artifacts
 frontend/dist/

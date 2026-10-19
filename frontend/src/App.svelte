@@ -2,7 +2,8 @@
   import Sidebar from './components/Sidebar.svelte';
   import NoteEditor from './components/NoteEditor.svelte';
   import Search from './components/Search.svelte';
-  import GraphView from './components/GraphView.svelte';
+  import { onMount } from 'svelte';
+  import { hasUnsavedDrafts } from './lib/drafts.js';
   import { theme } from './stores/theme.js';
 
   let currentView = 'home';
@@ -10,20 +11,26 @@
   let searchQuery = '';
   let sidebarOpen = true;
   let mobile = false;
+  let GraphView;
+  let graphError = '';
+
+  async function ensureGraph() {
+    try { GraphView = (await import('./components/GraphView.svelte')).default; }
+    catch (error) { graphError = error.message; }
+  }
 
   function checkMobile() {
-    mobile = window.innerWidth <= 768;
-    if (mobile) sidebarOpen = false;
-    else sidebarOpen = true;
+    const next = window.innerWidth <= 768;
+    if (next !== mobile) sidebarOpen = !next;
+    mobile = next;
   }
 
   checkMobile();
-  window.addEventListener('resize', checkMobile);
 
   function navigateToNote(path) {
     currentPath = path;
     currentView = 'note';
-    window.history.pushState({}, '', `/note/${path}`);
+    window.history.pushState({}, '', `/note/${encodeURIComponent(path)}`);
     if (mobile) sidebarOpen = false;
   }
 
@@ -42,6 +49,7 @@
   }
 
   function navigateToGraph() {
+    ensureGraph();
     currentPath = '';
     currentView = 'graph';
     window.history.pushState({}, '', '/graph');
@@ -58,6 +66,7 @@
       searchQuery = params.get('q') || '';
       currentView = 'search';
     } else if (path === '/graph') {
+      ensureGraph();
       currentPath = '';
       currentView = 'graph';
     } else if (path === '/') {
@@ -66,17 +75,31 @@
     }
   }
 
-  window.addEventListener('popstate', handlePopState);
   handlePopState();
+  onMount(() => {
+    const warn = event => { if (hasUnsavedDrafts()) { event.preventDefault(); event.returnValue = ''; } };
+    window.addEventListener('beforeunload', warn);
+    window.addEventListener('resize', checkMobile);
+    window.addEventListener('popstate', handlePopState);
+    return () => {
+      window.removeEventListener('beforeunload', warn);
+      window.removeEventListener('resize', checkMobile);
+      window.removeEventListener('popstate', handlePopState);
+    };
+  });
 </script>
 
 <div class="app" data-theme={$theme} class:sidebar-open={sidebarOpen} class:mobile>
   <!-- Mobile overlay backdrop -->
   {#if mobile && sidebarOpen}
-    <div class="sidebar-backdrop" on:click={() => sidebarOpen = false}></div>
+    <button class="sidebar-backdrop" aria-label="Close navigation" on:click={() => sidebarOpen = false}></button>
+  {/if}
+  {#if mobile && !sidebarOpen}
+    <button class="mobile-nav-toggle" aria-label="Open navigation" aria-expanded={sidebarOpen} on:click={() => sidebarOpen = true}><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 6h18M3 12h18M3 18h18"/></svg></button>
   {/if}
 
   <Sidebar
+    on:home={navigateHome}
     on:navigate={e => navigateToNote(e.detail)}
     on:search={() => navigateToSearch()}
     on:graph={() => navigateToGraph()}
@@ -101,7 +124,8 @@
     {:else if currentView === 'search'}
       <Search query={searchQuery} on:navigate={e => navigateToNote(e.detail)} />
     {:else if currentView === 'graph'}
-      <GraphView on:navigate={e => navigateToNote(e.detail)} />
+      {#if GraphView}<svelte:component this={GraphView} on:navigate={e => navigateToNote(e.detail)} />
+      {:else}<p role="status">{graphError || 'Loading graph…'}</p>{/if}
     {/if}
   </main>
 </div>
@@ -156,12 +180,16 @@
   }
 
   .sidebar-backdrop {
+    border: 0;
+    padding: 0;
     position: fixed;
     inset: 0;
     background: var(--overlay-bg);
     z-index: 90;
     backdrop-filter: blur(2px);
   }
+
+  .mobile-nav-toggle { position: fixed; bottom: 1rem; left: 1rem; z-index: 110; min-width: 44px; min-height: 44px; border: 1px solid var(--border-color); border-radius: var(--radius); background: var(--bg-elevated); color: var(--primary); cursor: pointer; }
 
   /* Mobile */
   @media (max-width: 768px) {
