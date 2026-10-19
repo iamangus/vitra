@@ -216,7 +216,7 @@ func (idx *VaultIndex) Search(query string) []SearchResult {
 	var results []SearchResult
 	for _, meta := range idx.notes {
 		if strings.Contains(strings.ToLower(meta.Content), query) {
-			results = append(results, SearchResult{Path: meta.Path, Title: meta.Title})
+			results = append(results, SearchResult{Path: meta.Path, Title: meta.Title, Snippet: searchSnippet(meta.Content, query)})
 		}
 	}
 	sort.Slice(results, func(i, j int) bool { return results[i].Path < results[j].Path })
@@ -319,8 +319,28 @@ type GraphLink struct {
 }
 
 type SearchResult struct {
-	Path  string `json:"path"`
-	Title string `json:"title"`
+	Path    string `json:"path"`
+	Title   string `json:"title"`
+	Snippet string `json:"snippet,omitempty"`
+}
+
+func searchSnippet(content, query string) string {
+	_, body := parseNote([]byte(content))
+	text := strings.Join(strings.Fields(string(body)), " ")
+	runes := []rune(text)
+	start := 0
+	if index := strings.Index(strings.ToLower(text), query); index >= 0 {
+		start = max(0, len([]rune(strings.ToLower(text)[:index]))-70)
+	}
+	end := min(len(runes), start+240)
+	snippet := string(runes[start:end])
+	if start > 0 {
+		snippet = "…" + snippet
+	}
+	if end < len(runes) {
+		snippet += "…"
+	}
+	return snippet
 }
 
 type BacklinkResult struct {

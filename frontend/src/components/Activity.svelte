@@ -1,143 +1,215 @@
 <script>
-  import { onMount } from 'svelte';
-  import { activity } from '../lib/api.js';
-  import { subscribeToLiveUpdates } from '../lib/live.js';
-
-  let entries = $state([]);
-  let loading = $state(true);
-  let error = $state(null);
-  let reloadTimeout = null;
+  import { onMount, createEventDispatcher } from "svelte";
+  import { activity } from "../lib/api.js";
+  import { subscribeToLiveUpdates } from "../lib/live.js";
+  import Icon from "./Icon.svelte";
+  import EmptyState from "./EmptyState.svelte";
+  const dispatch = createEventDispatcher();
+  let entries = [];
+  let loading = true;
+  let error = "";
+  let reloadTimer;
+  let generation = 0;
+  $: dates = [...new Set(entries.map((entry) => entry.date))];
 
   async function loadFeed() {
-    loading = true;
-    error = null;
+    const id = ++generation;
     try {
-      entries = await activity.list({ limit: '100' });
-    } catch (e) {
-      error = e.message;
+      const result = await activity.list({ limit: "100" });
+      if (id === generation) {
+        entries = result || [];
+        error = "";
+      }
+    } catch {
+      if (id === generation)
+        error = "Activity could not load. Check your connection and try again.";
     } finally {
-      loading = false;
+      if (id === generation) loading = false;
     }
   }
-
-  function scheduleReload() {
-    clearTimeout(reloadTimeout);
-    reloadTimeout = setTimeout(loadFeed, 250);
+  function formatDate(date) {
+    const parsed = new Date(date + "T12:00:00Z");
+    return Number.isNaN(parsed.getTime())
+      ? date
+      : new Intl.DateTimeFormat("en", {
+          month: "long",
+          day: "numeric",
+          year: "numeric",
+          timeZone: "UTC",
+        }).format(parsed);
   }
-
   onMount(() => {
     loadFeed();
-    const unsub = subscribeToLiveUpdates((event) => {
-      if (event.activity) scheduleReload();
+    const unsubscribe = subscribeToLiveUpdates((event) => {
+      if (event.activity) {
+        clearTimeout(reloadTimer);
+        reloadTimer = setTimeout(loadFeed, 250);
+      }
     });
     return () => {
-      clearTimeout(reloadTimeout);
-      unsub();
+      generation++;
+      clearTimeout(reloadTimer);
+      unsubscribe();
     };
   });
 </script>
 
-<div class="activity-panel">
-  {#if loading}
-    <div class="loading">Loading activity...</div>
-  {:else if error}
-    <div class="error">{error}</div>
-  {:else if entries.length === 0}
-    <div class="empty">
-      <p>No activity recorded.</p>
-      <p class="hint">Add <code>log.md</code> files with ISO date headings and bullet entries to see activity here.</p>
-    </div>
-  {:else}
-    <div class="entries">
-      {#each entries as entry}
-        <div class="entry">
-          <div class="entry-meta">
-            <span class="entry-date">{entry.date}</span>
-            <span class="entry-source" title={entry.source}>{entry.source_path || entry.source}</span>
-          </div>
-          <div class="entry-text">{entry.text}</div>
-        </div>
-      {/each}
-    </div>
-  {/if}
+<div class="page">
+  <div class="page-inner activity-page">
+    <div class="eyebrow">The story of your vault</div>
+    <h1>Activity</h1>
+    <p class="page-description">
+      Changes, decisions, and discoveries. A timeline from your Markdown logs.
+    </p>
+    {#if loading}<div
+        class="feed-skeleton"
+        aria-label="Loading activity"
+        aria-busy="true"
+      >
+        {#each [1, 2, 3] as item}<div
+            class="skeleton"
+            style="width:80%;height:18px"
+          ></div>
+          <div class="skeleton" style="width:55%;height:12px"></div>{/each}
+      </div>
+    {:else if error}<EmptyState
+        icon="warning"
+        title="Activity is unavailable"
+        message={error}
+        compact
+        ><button class="button" on:click={loadFeed}>Try again</button
+        ></EmptyState
+      >
+    {:else if !entries.length}<EmptyState
+        icon="activity"
+        title="Every note has a story"
+        message="Record updates in log.md files using date headings and activity entries. They’ll appear here as your vault evolves."
+        compact
+        ><details class="log-example">
+          <summary>See the log format</summary>
+          <pre>## 2026-10-19
+
+* **Update**: Documented a useful idea.</pre>
+        </details></EmptyState
+      >
+    {:else}<div class="timeline">
+        {#each dates as date}<section aria-label={formatDate(date)}>
+            <h2><time datetime={date}>{formatDate(date)}</time></h2>
+            <div class="date-entries">
+              {#each entries.filter((entry) => entry.date === date) as entry}<div
+                  class="entry"
+                >
+                  <span class="timeline-dot"></span>
+                  <div class="entry-header">
+                    <span class="tag-chip">{entry.kind || "Update"}</span
+                    ><button
+                      class="entry-source"
+                      title={"Open " + entry.source}
+                      on:click={() => dispatch("navigate", entry.source)}
+                      ><Icon name="note" size={13} />{entry.source_path === "."
+                        ? "Vault log"
+                        : entry.source_path || "Vault log"}<Icon
+                        name="arrow"
+                        size={12}
+                      /></button
+                    >
+                  </div>
+                  <p>{entry.text}</p>
+                </div>{/each}
+            </div>
+          </section>{/each}
+      </div>{/if}
+  </div>
 </div>
 
 <style>
-  .activity-panel {
-    flex: 1;
-    overflow-y: auto;
-    padding: 0.75rem;
+  .activity-page {
+    max-width: 780px;
   }
-
-  .loading, .error, .empty {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    height: 100%;
-    color: var(--color-muted);
-    font-size: 0.8125rem;
-    padding: 2rem;
-    text-align: center;
-    gap: 0.5rem;
+  .timeline {
+    margin-top: 40px;
   }
-
-  .error {
-    color: var(--accent-missing);
+  section {
+    margin-bottom: 34px;
   }
-
-  .hint {
-    font-size: 0.75rem;
-    opacity: 0.7;
+  h2 {
+    font-size: 12px;
+    font-weight: 550;
+    margin: 0 0 18px;
   }
-
-  .hint code {
-    background: var(--hover-bg);
-    padding: 0.125rem 0.375rem;
-    border-radius: var(--radius-sm);
-    font-size: 0.75rem;
+  .date-entries {
+    border-left: 1px solid var(--border-strong);
+    margin-left: 5px;
   }
-
-  .entries {
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
-  }
-
   .entry {
-    padding: 0.5rem 0.625rem;
-    border-radius: var(--radius-sm);
-    background: var(--bg);
-    border: 1px solid var(--border-color);
+    position: relative;
+    padding: 0 0 24px 26px;
   }
-
-  .entry-meta {
+  .timeline-dot {
+    position: absolute;
+    left: -4px;
+    top: 9px;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--primary);
+    box-shadow: 0 0 0 4px var(--bg);
+  }
+  .entry-header {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    gap: 0.5rem;
-    margin-bottom: 0.25rem;
+    flex-wrap: wrap;
+    gap: 10px;
   }
-
-  .entry-date {
-    font-size: 0.6875rem;
-    font-weight: 600;
-    color: var(--primary);
-    font-family: var(--font-mono);
-  }
-
   .entry-source {
-    font-size: 0.625rem;
-    color: var(--color-faint);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    max-width: 12rem;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    border: 0;
+    background: none;
+    color: var(--color-muted);
+    font-size: 11px;
+    padding: 4px 0;
+    overflow-wrap: anywhere;
+    max-width: 100%;
   }
-
-  .entry-text {
-    font-size: 0.8125rem;
-    color: var(--color);
-    line-height: 1.5;
+  .entry-source:hover {
+    color: var(--primary);
+  }
+  .entry p {
+    font-size: 14px;
+    line-height: 1.8;
+    margin: 9px 0 0;
+    overflow-wrap: anywhere;
+  }
+  .feed-skeleton {
+    display: grid;
+    gap: 20px;
+    padding: 30px 0;
+  }
+  .log-example {
+    text-align: left;
+    max-width: 100%;
+    font-size: 12px;
+    color: var(--color-muted);
+  }
+  .log-example summary {
+    cursor: pointer;
+  }
+  pre {
+    padding: 16px;
+    background: var(--code-bg);
+    border-radius: 8px;
+    overflow-x: auto;
+    max-width: 100%;
+    font-size: 11px;
+  }
+  @media (max-width: 768px) {
+    .entry-source {
+      min-height: 44px;
+    }
+    .entry {
+      padding-left: 21px;
+    }
   }
 </style>
