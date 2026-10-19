@@ -59,7 +59,7 @@
   }
 </script>
 
-{#each nodes as node (node.Path)}
+{#each nodes as node (String(node.IsDir) + ":" + node.Path)}
   <div class="tree-item" class:selected={node.Path === activePath}>
     {#if node.IsDir}
       <details

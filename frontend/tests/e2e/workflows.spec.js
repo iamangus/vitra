@@ -245,6 +245,40 @@ test("mobile navigation remains reachable", async ({ page }) => {
   ).toBeVisible();
 });
 
+test("same-name notes and folders keep distinct file actions", async ({
+  page,
+  request,
+}) => {
+  await createNote(request, "Twin", "Neighbor note remains intact");
+  await createNote(request, "Twin/Child", "Child stays with folder");
+  await page.goto("/note/Twin");
+  await expect(page.locator('a[data-path="Twin"]')).toBeVisible();
+  await expect(page.locator('summary[data-path="Twin"]')).toBeVisible();
+  await page.locator('summary[data-path="Twin"]').click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Rename", exact: true }).click();
+  await page.getByLabel("Name", { exact: true }).fill("RenamedFolder");
+  await page.getByRole("button", { name: "Rename", exact: true }).click();
+  await expect(
+    page.locator('summary[data-path="RenamedFolder"]'),
+  ).toBeVisible();
+  await expect(page).toHaveURL("/note/Twin");
+  expect((await (await request.get("/api/note/Twin")).json()).content).toBe(
+    "Neighbor note remains intact",
+  );
+  expect(
+    (await (await request.get("/api/note/RenamedFolder%2FChild")).json())
+      .content,
+  ).toBe("Child stays with folder");
+  await page.locator('a[data-path="Twin"]').click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Rename", exact: true }).click();
+  await page.getByLabel("Name", { exact: true }).fill("Twin.md");
+  await page.getByRole("button", { name: "Rename", exact: true }).click();
+  await expect(page.locator('[data-note-path="Twin.md"]')).toBeVisible();
+  expect((await (await request.get("/api/note/Twin.md")).json()).content).toBe(
+    "Neighbor note remains intact",
+  );
+});
+
 test("graph tolerates no links, theme changes and repeated route mounts", async ({
   page,
 }) => {

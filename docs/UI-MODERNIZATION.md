@@ -39,7 +39,7 @@ Local environment: Node 24.22.0, Go 1.26.9, Playwright Chromium with software We
 - `npm run check`: no Svelte errors or warnings.
 - `npm test`: 9 passing tests, including light/dark normal-text contrast tokens at 4.5:1 or higher on their tested surfaces.
 - `npm run build`: passing production build, locally bundled fonts.
-- `npm run test:e2e`: 27 browser workflows, including the original 11 updated for application dialogs plus visual/accessibility/responsive coverage.
+- `npm run test:e2e`: 28 browser workflows, including the original 11 updated for application dialogs plus visual/accessibility/responsive and same-name note/folder coverage.
 - axe WCAG A/AA checks on representative reader, home, search, activity, graph, and modal states; no detected violations in tested states. This is not a claim of complete WCAG certification or assistive-device testing.
 - Keyboard and emulated touch checks: modal Escape/focus restoration, visible file actions, move picker, mobile drawer, outline navigation, raw-source editing, split fallback, explicit graph opening.
 - Data safety: note-bound saves during navigation, stale response cancellation, revision conflict, recovered draft persistence, cancel/discard safeguards, move flush, literal extension collision protection, hostile HTML and Origin regression checks.
@@ -52,7 +52,7 @@ Fresh builds of merged `main` and this branch, same Node/Vite environment (decim
 
 | Asset | Merged main | Modernized |
 | --- | ---: | ---: |
-| Main JS | 84.28 kB / 29.16 gzip | 106.34 kB / 37.98 gzip |
+| Main JS | 84.28 kB / 29.16 gzip | 106.48 kB / 38.01 gzip |
 | Main CSS | 21.76 kB / 4.19 gzip | 30.16 kB / 6.43 gzip |
 | Deferred graph JS | 1,476.91 kB / 396.68 gzip | 1,480.34 kB / 398.05 gzip |
 | Local font assets | none | 48.25 kB Inter + 40.40 kB JetBrains Mono |

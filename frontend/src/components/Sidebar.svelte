@@ -159,16 +159,16 @@
     };
   }
 
-  function navigateAfterRename(oldPath, newPath) {
-    if (activePath === oldPath) dispatch("navigate", newPath);
-    else if (activePath.startsWith(oldPath + "/"))
+  function navigateAfterRename(oldPath, newPath, isDir) {
+    if (!isDir && activePath === oldPath) dispatch("navigate", newPath);
+    else if (isDir && activePath.startsWith(oldPath + "/"))
       dispatch("navigate", newPath + activePath.slice(oldPath.length));
   }
 
   async function move(oldPath, newPath, isDir) {
     await flushAffectedDrafts(oldPath);
     await fileOps.rename(entryPath(oldPath, isDir), entryPath(newPath, isDir));
-    navigateAfterRename(oldPath, newPath);
+    navigateAfterRename(oldPath, newPath, isDir);
     if (parent(newPath)) {
       const next = new Set(expanded);
       next.add(parent(newPath));
@@ -203,8 +203,8 @@
         await flushAffectedDrafts(action.path);
         await fileOps.delete(entryPath(action.path, action.isDir));
         if (
-          activePath === action.path ||
-          activePath.startsWith(action.path + "/")
+          (!action.isDir && activePath === action.path) ||
+          (action.isDir && activePath.startsWith(action.path + "/"))
         )
           dispatch("view", "home");
       } else {
@@ -244,7 +244,11 @@
     dragOverRoot = false;
     dragging = false;
     const source = event.dataTransfer.getData("text/plain");
-    const node = flatten(treeData).find((node) => node.Path === source);
+    const isDir =
+      event.dataTransfer.getData("application/x-vitra-directory") === "true";
+    const node = flatten(treeData).find(
+      (node) => node.Path === source && node.IsDir === isDir,
+    );
     if (node && parent(source))
       await handleMove({
         detail: {

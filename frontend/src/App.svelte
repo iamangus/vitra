@@ -68,7 +68,10 @@
           : `/${view}${view === "search" && searchQuery ? "?q=" + encodeURIComponent(searchQuery) : ""}`;
     window.history.pushState({}, "", url);
     if (mobile) sidebarOpen = false;
-    if (view === "search") tick().then(() => document.getElementById("global-search-input")?.focus());
+    if (view === "search")
+      tick().then(() =>
+        document.getElementById("global-search-input")?.focus(),
+      );
   }
 
   function handlePopState() {
