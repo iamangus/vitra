@@ -52,7 +52,7 @@ Fresh builds of merged `main` and this branch, same Node/Vite environment (decim
 
 | Asset | Merged main | Modernized |
 | --- | ---: | ---: |
-| Main JS | 84.28 kB / 29.16 gzip | 106.26 kB / 37.96 gzip |
+| Main JS | 84.28 kB / 29.16 gzip | 106.34 kB / 37.98 gzip |
 | Main CSS | 21.76 kB / 4.19 gzip | 30.16 kB / 6.43 gzip |
 | Deferred graph JS | 1,476.91 kB / 396.68 gzip | 1,480.34 kB / 398.05 gzip |
 | Local font assets | none | 48.25 kB Inter + 40.40 kB JetBrains Mono |
