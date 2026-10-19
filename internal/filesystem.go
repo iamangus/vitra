@@ -509,7 +509,7 @@ func (fs *FileSystem) buildTree(dir string, activePath string, depth int) ([]Fil
 		relPath, _ := filepath.Rel(fs.VaultPath, fullPath)
 		relPath = filepath.ToSlash(relPath)
 
-		if excludedPath(relPath, fs.skillsDirRel, true) || entry.Type()&os.ModeSymlink != 0 || (!entry.IsDir() && !strings.HasSuffix(name, ".md")) {
+		if excludedPath(relPath, "", true) || entry.Type()&os.ModeSymlink != 0 || (!entry.IsDir() && !strings.HasSuffix(name, ".md")) {
 			continue
 		}
 		node := FileNode{

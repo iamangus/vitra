@@ -155,6 +155,7 @@ tags: [example, demo]
 The skill content — read it with read_note.
 ```
 
-Skills are excluded from the OKF catalog (concepts, graph, activity, semantic
-index, vault index) and from the sidebar file tree. `type` is OKF canonical
+Skills appear in the sidebar file tree like ordinary notes and folders, but
+are excluded from the OKF catalog (concepts, graph, activity, semantic
+index, vault index). `type` is OKF canonical
 (`Skill`, capitalized).
