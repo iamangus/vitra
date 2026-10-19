@@ -1,5 +1,6 @@
 import { test, expect } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
+import { fileURLToPath } from "node:url";
 
 const path = "Design/Research/Systems/Calm workspace";
 const title = "Building a calmer knowledge workspace";
@@ -313,7 +314,7 @@ test("graph selection is keyboard accessible and opening is explicit", async ({
     ).violations,
   ).toEqual([]);
   await expect(page).toHaveScreenshot("graph-selected-dark.png", {
-    style: ".graph-canvas canvas { visibility: hidden !important; }",
+    stylePath: fileURLToPath(new URL("../visual.css", import.meta.url)),
     animations: "disabled",
     maxDiffPixelRatio: 0.005,
   });

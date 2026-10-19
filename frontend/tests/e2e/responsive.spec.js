@@ -1,5 +1,6 @@
 import { test, expect } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
+import { fileURLToPath } from "node:url";
 
 for (const theme of ["light", "dark"]) {
   test(`phone ${theme} secondary views and graph controls`, async ({
@@ -133,7 +134,7 @@ for (const theme of ["light", "dark"]) {
       ).violations,
     ).toEqual([]);
     await expect(page).toHaveScreenshot(`graph-phone-${theme}.png`, {
-      style: ".graph-canvas canvas { visibility: hidden !important; }",
+      stylePath: fileURLToPath(new URL("../visual.css", import.meta.url)),
       animations: "disabled",
       maxDiffPixelRatio: 0.005,
     });
